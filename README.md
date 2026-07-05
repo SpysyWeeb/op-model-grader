@@ -211,6 +211,37 @@ baseline (per-bucket n≥3 gating), plus time-in-mode/personality chips in the
 header. Old logs that predate the personality field are reported as
 personality-unknown rather than guessed.
 
+### Driver profile (baseline pooling)
+
+How you drive doesn't reset between routes, so your manual-driving samples
+accumulate across every route you grade into a local profile
+(`~/.local/share/opgrader/profile.json`, override with `OPGRADER_DATA`),
+keyed by car fingerprint, and get pooled into the human baseline for every
+future grade — the fix for Launch, Turn-In Timing, and low-speed Ping-Pong
+bins running dry on any single drive.
+
+- **What's pooled**: only genuine model-vs-driver ratio metrics (median time
+  gap, jerk, stop lurch, turn-in delay, Ping-Pong's per-speed-bin
+  oscillation, …). Never pooled: metrics with no human counterpart
+  (rescue rate), follow adherence (scored against a target, not you), Speed
+  Disagreement (measures your own override behavior), or the Plan-vs-You
+  counterfactuals (a different, paired-data shape entirely).
+- **Never skews**: pooling only ever extends the *driver* side. The model
+  side is always exactly what it drove this run — pooling can make the human
+  baseline steadier, never make the model look better or worse than it did.
+- **Route-atomic and idempotent**: each stored route is a self-contained
+  entry keyed by route id; re-grading a route replaces its entry rather than
+  double-counting it, and storage caps at 60 routes per fingerprint (oldest
+  dropped first).
+- **Transparent**: a metric's "You" value shows `(n=X this drive + Y pooled
+  = Z)` whenever a profile actually contributed, plus the same-drive-only
+  number when it independently qualifies and differs.
+- **Your data, your call**: `--no-profile` grades a run in isolation
+  (neither reads nor writes the file); `--clear-profile` deletes it after
+  confirmation (or use the button in the UI). The file holds only
+  fingerprints, route ids/timestamps, metric names, and float arrays — no
+  raw traces, location, or params content.
+
 ### Driving-model identification
 
 The report header names the driving model when it can, in layers:
