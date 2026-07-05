@@ -43,32 +43,32 @@ opgrader --route "a2a0ccea32023010|2023-07-27--13-01-19" -o report.html
 opgrader --ui
 ```
 
-### Web UI
+### Simple UI
 
-`opgrader --ui` (optionally `--port 8385`) starts a small local server and
-opens your browser. From there the whole flow is point-and-click:
+`opgrader --ui` opens a small desktop window (plain Python/Tkinter — nothing
+extra to install beyond your distro's `python3-tk` package, which most
+systems already have). The whole flow is point-and-click:
 
 1. **Sign in once** — if `~/.comma/auth.json` doesn't have a token yet, the
-   page walks you through getting one (https://jwt.comma.ai) and saves what
-   you paste (file is created with 0600 permissions; other keys in that JSON
-   are left alone).
-2. **Browse routes** — pick a device, see your recent drives newest-first
+   window shows a paste box and a button that opens https://jwt.comma.ai;
+   what you paste is validated and saved (file created with 0600
+   permissions, other keys in that JSON left alone).
+2. **Browse drives** — pick a device, see your recent drives newest-first
    with start time, duration, segment count, git branch, and an rlog
    availability badge ("rlogs ready 12/12", "rlogs 4/12", "qlogs only").
-3. **Request uploads** — for drives whose rlogs are still on the device,
-   one click asks the device (via athena) to upload them. Uploads happen
-   when the device is on WiFi unless you tick "upload over cell data". If
-   the device is offline you'll be told to start the car and try again; the
-   badge refreshes automatically (~30 s) while the request is pending.
-4. **Grade** — tick one or more routes with rlogs ready (partial ≥80% is
-   allowed, with a warning), optionally add local rlog directories, hit
-   Grade. Progress (download → decode → grade) is shown live; the finished
-   report opens in a new tab and stays in the "past reports" list
-   (`~/.cache/opgrader/reports/`).
+3. **Request uploads** — select drives whose rlogs are still on the device
+   and click "Request upload". Uploads happen when the device is on WiFi
+   unless you tick "upload over cell data". If the device is offline you'll
+   be told to start the car and try again; the badge refreshes itself every
+   ~30 s while a request is pending.
+4. **Grade** — select one or more drives with rlogs ready (partial ≥80% is
+   allowed, with a warning), optionally add local rlog folders, hit Grade.
+   Progress (download → decode → grade) is shown live; the finished report
+   opens in your browser and stays in the "past reports" list
+   (`~/.cache/opgrader/reports/`, double-click to reopen).
 
-Security: the server binds to **127.0.0.1 only** — nothing on your network
-can reach it — and your JWT is only ever sent to api.comma.ai and
-athena.comma.ai, never anywhere else.
+Everything runs on your computer; your JWT is only ever sent to
+api.comma.ai and athena.comma.ai, never anywhere else.
 
 ## How grading works
 

@@ -1,22 +1,7 @@
-"""Local web UI: browse comma-connect routes, request uploads, grade drives.
+"""comma-connect client + grading-job machinery (UI-agnostic).
 
-Runs a stdlib ThreadingHTTPServer bound to 127.0.0.1 only. The page it
-serves (assets/ui.html) talks to the JSON endpoints below; the server talks
-to api.comma.ai / athena.comma.ai with the JWT from ~/.comma/auth.json and
-never sends it anywhere else.
-
-Endpoints:
-  GET  /                    the single-page UI
-  GET  /api/me              auth check (identity or authed:false)
-  POST /api/auth            save a pasted JWT to ~/.comma/auth.json (0600)
-  GET  /api/devices         the account's devices
-  GET  /api/routes?dongle=  recent routes (routes_segments, newest first)
-  GET  /api/route_files?route=   rlog/qlog availability for one route
-  POST /api/request_upload  ask the device (via athena) to upload rlogs
-  POST /api/grade           start a grading job (one at a time)
-  GET  /api/job             job phase/progress/result
-  GET  /api/reports         past reports in the reports dir
-  GET  /reports/<name>      serve a finished report
+Used by the Tkinter UI (gui.py). Talks only to api.comma.ai and
+athena.comma.ai with the JWT from ~/.comma/auth.json.
 """
 
 from __future__ import annotations
@@ -28,8 +13,6 @@ import threading
 import time
 import traceback
 import urllib.parse
-import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import requests
@@ -39,10 +22,6 @@ from .download import AUTH_FILE, CACHE_DIR, route_log_urls
 API_BASE = "https://api.comma.ai/v1"
 ATHENA_BASE = "https://athena.comma.ai"
 REPORTS_DIR = CACHE_DIR / "reports"
-
-_CACHE_TTL = {"devices": 60.0, "routes": 60.0, "files": 20.0}
-_api_cache: dict[tuple, tuple[float, object]] = {}
-_api_cache_lock = threading.Lock()
 
 
 class ApiError(RuntimeError):
@@ -98,40 +77,21 @@ def api_get(path: str, jwt: str, timeout: float = 30.0):
     return r.json()
 
 
-def _cached(kind: str, key: tuple, fetch, fresh: bool):
-    now = time.time()
-    with _api_cache_lock:
-        hit = _api_cache.get((kind, key))
-        if hit and not fresh and now - hit[0] < _CACHE_TTL[kind]:
-            return hit[1]
-    data = fetch()
-    with _api_cache_lock:
-        _api_cache[(kind, key)] = (now, data)
-    return data
-
-
 def get_me(jwt: str) -> dict:
     return api_get("/me/", jwt)
 
 
-def get_devices(jwt: str, fresh: bool = False) -> list:
-    return _cached("devices", (), lambda: api_get("/me/devices/", jwt), fresh)
+def get_devices(jwt: str) -> list:
+    return api_get("/me/devices/", jwt)
 
 
-def get_routes(dongle: str, jwt: str, limit: int = 30, fresh: bool = False) -> list:
-    return _cached(
-        "routes",
-        (dongle, limit),
-        lambda: api_get(f"/devices/{dongle}/routes_segments?limit={limit}", jwt),
-        fresh,
-    )
+def get_routes(dongle: str, jwt: str, limit: int = 30) -> list:
+    return api_get(f"/devices/{dongle}/routes_segments?limit={limit}", jwt)
 
 
-def get_route_files(fullname: str, jwt: str, fresh: bool = False) -> dict:
+def get_route_files(fullname: str, jwt: str) -> dict:
     quoted = urllib.parse.quote(fullname, safe="")
-    return _cached(
-        "files", (fullname,), lambda: api_get(f"/route/{quoted}/files", jwt), fresh
-    )
+    return api_get(f"/route/{quoted}/files", jwt)
 
 
 def summarize_route(r: dict) -> dict:
@@ -221,7 +181,10 @@ def request_upload(
         raise ApiError(f"upload_urls failed: HTTP {r.status_code} {r.text[:200]}")
     url_items = r.json()
     if not isinstance(url_items, list) or len(url_items) != len(paths):
-        raise ApiError(f"upload_urls returned {len(url_items) if isinstance(url_items, list) else '?'} urls for {len(paths)} paths")
+        raise ApiError(
+            f"upload_urls returned {len(url_items) if isinstance(url_items, list) else '?'} "
+            f"urls for {len(paths)} paths"
+        )
 
     payload = build_athena_payload(paths, url_items, allow_cellular)
     ar = requests.post(
@@ -284,10 +247,10 @@ class JobManager:
                 self._state["detail"] = detail
             self._state["progress"] = progress
 
-    def finish(self, report_url: str):
+    def finish(self, report_path: str):
         with self._lock:
             self._state.update(
-                active=False, phase="done", report=report_url, progress=None,
+                active=False, phase="done", report=report_path, progress=None,
                 detail="report ready",
             )
 
@@ -308,17 +271,17 @@ class JobManager:
             return dict(self._state)
 
 
-JOBS = JobManager()
-
-
 def _slug(parts: list[str]) -> str:
     text = "_".join(p.rsplit("/", 1)[-1] for p in parts)[:60]
     return re.sub(r"[^\w.-]+", "-", text).strip("-") or "drive"
 
 
 def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str | None):
-    """Download missing rlogs, run the pipeline, write the report."""
-    # imports here so a UI session without grading stays snappy to start
+    """Download missing rlogs, run the pipeline, write the report.
+
+    Meant to run in a background thread; never raises (failures land in the
+    job state). On success job.report is the absolute report path.
+    """
     from .events import build_arrays, detect_events
     from .extract import extract_drive
     from .logreader import find_segments, group_segments, route_name_for_group
@@ -365,7 +328,7 @@ def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str
         groups = group_segments(seg_files)
 
         per_drive = []
-        for gi, g in enumerate(groups):
+        for g in groups:
             name = route_name_for_group(g)
 
             def cb(i, n, _ev, _name=name):
@@ -393,187 +356,18 @@ def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str
         job.update(phase="rendering", detail="writing report")
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         fname = f"{time.strftime('%Y%m%d-%H%M%S')}_{_slug(routes + paths)}.html"
-        render_report(analysis, REPORTS_DIR / fname)
-        job.finish(f"/reports/{fname}")
+        out = REPORTS_DIR / fname
+        render_report(analysis, out)
+        job.finish(str(out))
     except BaseException as e:  # noqa: BLE001 - job thread must never raise
         job.fail(e)
 
 
-# ------------------------------------------------------------------- server
-
-
-_UI_PATH = Path(__file__).resolve().parent / "assets" / "ui.html"
-_REPORT_NAME_RE = re.compile(r"^[\w.-]+\.html$")
-
-
-class Handler(BaseHTTPRequestHandler):
-    server_version = "opgrader"
-
-    # ---- plumbing
-    def log_message(self, fmt, *args):  # quiet
-        pass
-
-    def _send(self, code: int, body: bytes, ctype: str):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _json(self, obj, code: int = 200):
-        self._send(code, json.dumps(obj).encode(), "application/json")
-
-    def _err(self, message: str, code: int = 500):
-        self._json({"error": message}, code)
-
-    def _body(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
-        if n <= 0:
-            return {}
-        try:
-            return json.loads(self.rfile.read(n))
-        except json.JSONDecodeError:
-            return {}
-
-    # ---- routing
-    def do_GET(self):
-        try:
-            self._route_get()
-        except ApiError as e:
-            self._err(str(e), e.status)
-        except Exception as e:  # noqa: BLE001 - never crash the server
-            self._err(f"{type(e).__name__}: {e}", 500)
-
-    def do_POST(self):
-        try:
-            self._route_post()
-        except ApiError as e:
-            self._err(str(e), e.status)
-        except Exception as e:  # noqa: BLE001
-            self._err(f"{type(e).__name__}: {e}", 500)
-
-    def _route_get(self):
-        url = urllib.parse.urlparse(self.path)
-        q = urllib.parse.parse_qs(url.query)
-        fresh = q.get("fresh", ["0"])[0] == "1"
-        path = url.path
-
-        if path == "/" or path == "/index.html":
-            self._send(200, _UI_PATH.read_bytes(), "text/html; charset=utf-8")
-        elif path == "/api/me":
-            jwt = read_jwt()
-            if not jwt:
-                self._json({"authed": False, "reason": "no token"})
-                return
-            try:
-                me = get_me(jwt)
-                self._json({"authed": True, "email": me.get("email"),
-                            "user_id": me.get("user_id") or me.get("id")})
-            except ApiError as e:
-                self._json({"authed": False, "reason": str(e)})
-        elif path == "/api/devices":
-            self._json({"devices": get_devices(self._jwt(), fresh)})
-        elif path == "/api/routes":
-            dongle = q.get("dongle", [""])[0]
-            if not dongle:
-                raise ApiError("missing ?dongle=", status=400)
-            routes = get_routes(dongle, self._jwt(), fresh=fresh)
-            routes = sorted(
-                (summarize_route(r) for r in routes),
-                key=lambda r: -(r["start_utc_millis"] or 0),
-            )
-            self._json({"routes": routes})
-        elif path == "/api/route_files":
-            fullname = q.get("route", [""])[0]
-            if "|" not in fullname:
-                raise ApiError("missing/invalid ?route=", status=400)
-            n_seg = int(q.get("segments", ["0"])[0])
-            files = get_route_files(fullname, self._jwt(), fresh=fresh)
-            self._json({"route": fullname, "badge": files_badge(files, n_seg)})
-        elif path == "/api/job":
-            self._json(JOBS.snapshot())
-        elif path == "/api/reports":
-            items = []
-            if REPORTS_DIR.is_dir():
-                for p in sorted(REPORTS_DIR.glob("*.html"), reverse=True):
-                    st = p.stat()
-                    items.append({"name": p.name, "url": f"/reports/{p.name}",
-                                  "mtime": st.st_mtime, "size": st.st_size})
-            self._json({"reports": items})
-        elif path.startswith("/reports/"):
-            name = urllib.parse.unquote(path[len("/reports/"):])
-            if not _REPORT_NAME_RE.match(name):
-                raise ApiError("bad report name", status=400)
-            f = (REPORTS_DIR / name).resolve()
-            if not str(f).startswith(str(REPORTS_DIR.resolve())) or not f.is_file():
-                raise ApiError("report not found", status=404)
-            self._send(200, f.read_bytes(), "text/html; charset=utf-8")
-        else:
-            self._err("not found", 404)
-
-    def _route_post(self):
-        path = urllib.parse.urlparse(self.path).path
-        body = self._body()
-
-        if path == "/api/auth":
-            token = str(body.get("token") or "")
-            try:
-                get_me(token)  # validate before saving
-            except ApiError:
-                raise ApiError("api.comma.ai rejected that token", status=401)
-            save_jwt(token)
-            self._json({"ok": True})
-        elif path == "/api/request_upload":
-            res = request_upload(
-                dongle=str(body.get("dongle") or ""),
-                route_name=str(body.get("route") or ""),
-                n_segments=int(body.get("segments") or 0),
-                jwt=self._jwt(),
-                allow_cellular=bool(body.get("allow_cellular")),
-            )
-            self._json(res)
-        elif path == "/api/grade":
-            routes = [str(r) for r in body.get("routes") or []]
-            paths = [str(p) for p in body.get("paths") or [] if str(p).strip()]
-            if not routes and not paths:
-                raise ApiError("select at least one route or local path", status=400)
-            for p in paths:
-                if not Path(p).expanduser().exists():
-                    raise ApiError(f"local path not found: {p}", status=400)
-            desc = ", ".join(routes + paths)
-            if not JOBS.try_start(desc):
-                raise ApiError("a grading job is already running — wait for it to finish", status=409)
-            jwt = read_jwt()
-            t = threading.Thread(
-                target=run_grade_job, args=(JOBS, routes, paths, jwt), daemon=True
-            )
-            t.start()
-            self._json({"ok": True})
-        else:
-            self._err("not found", 404)
-
-    def _jwt(self) -> str:
-        jwt = read_jwt()
-        if not jwt:
-            raise ApiError("not authenticated — paste a JWT first", status=401)
-        return jwt
-
-
-def make_server(port: int = 8385) -> ThreadingHTTPServer:
-    """Build the server (127.0.0.1 only). port=0 picks a free port."""
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
-
-
-def serve(port: int = 8385, open_browser: bool = True) -> None:
-    httpd = make_server(port)
-    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
-    print(f"opgrader web UI: {url}  (Ctrl-C to stop; local-only, your JWT stays on this machine)")
-    if open_browser:
-        webbrowser.open(url)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nshutting down")
-    finally:
-        httpd.server_close()
+def list_reports() -> list[dict]:
+    items = []
+    if REPORTS_DIR.is_dir():
+        for p in sorted(REPORTS_DIR.glob("*.html"), reverse=True):
+            st = p.stat()
+            items.append({"name": p.name, "path": str(p),
+                          "mtime": st.st_mtime, "size": st.st_size})
+    return items

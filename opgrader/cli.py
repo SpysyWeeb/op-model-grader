@@ -42,10 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--ui",
         action="store_true",
-        help="start the local web UI (browse routes, request uploads, grade)",
-    )
-    p.add_argument(
-        "--port", type=int, default=8385, help="web UI port (default 8385)"
+        help="open the simple desktop UI (browse drives, request uploads, grade)",
     )
     p.add_argument("--version", action="version", version=f"opgrader {__version__}")
     return p
@@ -58,12 +55,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.logs or args.route:
             print(
                 "warning: --ui ignores log paths and --route; "
-                "use the page to pick routes",
+                "use the window to pick drives",
                 file=sys.stderr,
             )
-        from .webui import serve
+        from .gui import run
 
-        serve(port=args.port)
+        run()
         return 0
 
     if not args.logs and not args.route:

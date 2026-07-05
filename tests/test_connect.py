@@ -1,17 +1,14 @@
-"""Web UI: payload construction, job state machine, server smoke test.
+"""connect layer: upload payload construction, badges, job state machine.
 
-No network: the comma API is mocked by monkeypatching opgrader.webui.requests.
+No network: the comma API is mocked by monkeypatching opgrader.connect.requests.
 """
 
 import json
-import threading
-import time
-import urllib.request
 
 import pytest
 
-from opgrader import webui
-from opgrader.webui import (
+from opgrader import connect
+from opgrader.connect import (
     ApiError,
     JobManager,
     build_athena_payload,
@@ -77,7 +74,7 @@ def test_request_upload_offline_device(monkeypatch):
             return _Resp(200, [{"url": f"https://blob/{i}"} for i in range(2)])
         return _Resp(404, {})  # athena: device offline
 
-    monkeypatch.setattr(webui.requests, "post", fake_post)
+    monkeypatch.setattr(connect.requests, "post", fake_post)
     with pytest.raises(ApiError) as e:
         request_upload("dongle1", "r--x", 2, "jwt", allow_cellular=False)
     assert "offline" in str(e.value)
@@ -96,7 +93,7 @@ def test_request_upload_success_and_cellular_flag(monkeypatch):
         seen["athena"] = json
         return _Resp(200, {"result": 123, "id": 0})
 
-    monkeypatch.setattr(webui.requests, "post", fake_post)
+    monkeypatch.setattr(connect.requests, "post", fake_post)
     res = request_upload("d", "route--abc", 3, "jwt", allow_cellular=True)
     assert res["ok"] is True
     assert "queued" in res["message"]
@@ -110,7 +107,7 @@ def test_request_upload_athena_error_verbatim(monkeypatch):
             return _Resp(200, [{"url": "https://blob/0"}])
         return _Resp(200, {"error": {"code": -32000, "message": "queue full"}})
 
-    monkeypatch.setattr(webui.requests, "post", fake_post)
+    monkeypatch.setattr(connect.requests, "post", fake_post)
     with pytest.raises(ApiError) as e:
         request_upload("d", "r--x", 1, "jwt")
     assert "queue full" in str(e.value)
@@ -158,10 +155,10 @@ def test_job_manager_state_machine():
     s = jm.snapshot()
     assert s["phase"] == "downloading" and s["progress"] == (1, 5)
 
-    jm.finish("/reports/x.html")
+    jm.finish("/tmp/x.html")
     s = jm.snapshot()
     assert s["active"] is False and s["phase"] == "done"
-    assert s["report"] == "/reports/x.html"
+    assert s["report"] == "/tmp/x.html"
 
     # can start again after finishing
     assert jm.try_start("job C") is True
@@ -178,64 +175,38 @@ def test_job_manager_state_machine():
     assert jm.snapshot()["phase"] == "error"
 
 
-# --------------------------------------------------------------- server smoke
+def test_run_grade_job_bad_path_fails_cleanly():
+    jm = JobManager()
+    assert jm.try_start("bad path")
+    connect.run_grade_job(jm, [], ["/nonexistent/rlogs"], None)
+    s = jm.snapshot()
+    assert s["phase"] == "error"
+    assert "not found" in s["error"]["message"]
 
 
-@pytest.fixture()
-def server():
-    httpd = webui.make_server(port=0)  # free port, 127.0.0.1 only
-    t = threading.Thread(target=httpd.serve_forever, daemon=True)
-    t.start()
-    yield f"http://127.0.0.1:{httpd.server_address[1]}"
-    httpd.shutdown()
-    httpd.server_close()
-    t.join(timeout=5)
+def test_run_grade_job_demo_route(tmp_path, monkeypatch):
+    """Local-path grading end to end through the job runner (no network)."""
+    from pathlib import Path
 
+    demo = Path(__file__).resolve().parent.parent / "testdata" / "demo"
+    if not demo.is_dir() or not list(demo.glob("rlog*")):
+        pytest.skip("demo rlogs not downloaded")
+    monkeypatch.setattr(connect, "REPORTS_DIR", tmp_path)
+    jm = JobManager()
+    assert jm.try_start("demo")
+    phases = []
 
-def _get(url):
-    with urllib.request.urlopen(url, timeout=5) as r:
-        return r.status, r.read()
+    orig_update = jm.update
 
+    def spy(phase=None, **kw):
+        if phase:
+            phases.append(phase)
+        orig_update(phase=phase, **kw)
 
-def test_server_serves_index_and_job(server):
-    status, body = _get(server + "/")
-    assert status == 200
-    assert b"op-model-grader" in body
-
-    status, body = _get(server + "/api/job")
-    assert status == 200
-    j = json.loads(body)
-    assert j["phase"] in ("idle", "done", "error")
-
-    status, body = _get(server + "/api/reports")
-    assert status == 200
-    assert "reports" in json.loads(body)
-
-
-def test_server_binds_localhost_only(server):
-    # the server address is literally 127.0.0.1
-    assert "127.0.0.1" in server
-
-
-def test_server_bad_requests_return_json_errors(server):
-    import urllib.error
-
-    with pytest.raises(urllib.error.HTTPError) as e:
-        _get(server + "/api/routes")  # missing dongle param
-    assert e.value.code in (400, 401)
-    assert "error" in json.loads(e.value.read())
-
-    with pytest.raises(urllib.error.HTTPError) as e:
-        _get(server + "/reports/../../etc/passwd.html")
-    assert e.value.code in (400, 404)
-
-    # POST /api/grade with nothing selected
-    req = urllib.request.Request(
-        server + "/api/grade",
-        data=json.dumps({"routes": [], "paths": []}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with pytest.raises(urllib.error.HTTPError) as e:
-        urllib.request.urlopen(req, timeout=5)
-    assert e.value.code == 400
+    jm.update = spy
+    connect.run_grade_job(jm, [], [str(demo)], None)
+    s = jm.snapshot()
+    assert s["phase"] == "done", s
+    report = Path(s["report"])
+    assert report.is_file() and report.stat().st_size > 100_000
+    assert "decoding" in phases and "grading" in phases

@@ -1,0 +1,479 @@
+"""Simple Tkinter UI: sign in, pick drives, request uploads, grade.
+
+Launched with `opgrader --ui`. Pure stdlib (tkinter) + the existing
+pipeline; all network and grading work runs in background threads and the
+widgets are only touched from the Tk main loop (via root.after).
+"""
+
+from __future__ import annotations
+
+import queue
+import threading
+import time
+import webbrowser
+from pathlib import Path
+
+from . import __version__
+from . import connect as C
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except ImportError as e:  # pragma: no cover - depends on the host python
+    raise SystemExit(
+        "tkinter is not available in this Python. Install your distro's "
+        "python3-tk / python3-tkinter package and try again."
+    ) from e
+
+POLL_JOB_MS = 500
+POLL_UPLOAD_MS = 30_000
+PARTIAL_OK_FRACTION = 0.8
+
+
+class App:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        root.title(f"op-model-grader {__version__}")
+        root.geometry("880x640")
+        root.minsize(720, 520)
+
+        self.jobs = C.JobManager()
+        self.jwt: str | None = None
+        self.dongles: list[dict] = []
+        self.routes: list[dict] = []          # summarize_route dicts
+        self.badges: dict[str, dict] = {}     # fullname -> files_badge dict
+        self.pending_uploads: set[str] = set()
+        self.local_paths: list[str] = []
+
+        self._q: queue.Queue = queue.Queue()
+        self._build_widgets()
+        root.after(50, self._pump)
+        self._bg(self._check_auth, self._on_auth_checked)
+        self._refresh_reports()
+
+    # ------------------------------------------------------------ threading
+    # Worker threads never touch Tk directly: they enqueue callbacks that the
+    # main loop drains every 50 ms (root.after from other threads is unsafe).
+
+    def _post(self, fn, *args):
+        self._q.put((fn, args))
+
+    def _pump(self):
+        try:
+            while True:
+                fn, args = self._q.get_nowait()
+                try:
+                    fn(*args)
+                except Exception:  # noqa: BLE001 - a bad callback must not kill the pump
+                    pass
+        except queue.Empty:
+            pass
+        self.root.after(50, self._pump)
+
+    def _bg(self, fn, on_done, *args):
+        """Run fn(*args) in a thread; call on_done(result, error) on the UI thread."""
+
+        def worker():
+            try:
+                result, error = fn(*args), None
+            except Exception as e:  # noqa: BLE001 - marshal errors to the UI
+                result, error = None, e
+            self._post(on_done, result, error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # -------------------------------------------------------------- widgets
+
+    def _build_widgets(self):
+        pad = {"padx": 8, "pady": 4}
+
+        # auth bar
+        self.auth_frame = ttk.LabelFrame(self.root, text="comma account")
+        self.auth_frame.pack(fill="x", **pad)
+        self.auth_label = ttk.Label(self.auth_frame, text="checking sign-in…")
+        self.auth_label.pack(side="left", padx=8, pady=6)
+        self.token_entry = ttk.Entry(self.auth_frame, width=42, show="*")
+        self.token_save = ttk.Button(self.auth_frame, text="Save token", command=self._save_token)
+        self.token_help = ttk.Button(
+            self.auth_frame, text="Get a token (jwt.comma.ai)",
+            command=lambda: webbrowser.open("https://jwt.comma.ai"),
+        )
+
+        # device + routes
+        routes_frame = ttk.LabelFrame(self.root, text="drives on your device")
+        routes_frame.pack(fill="both", expand=True, **pad)
+        top = ttk.Frame(routes_frame)
+        top.pack(fill="x", padx=6, pady=4)
+        ttk.Label(top, text="Device:").pack(side="left")
+        self.device_var = tk.StringVar()
+        self.device_box = ttk.Combobox(top, textvariable=self.device_var, state="readonly", width=40)
+        self.device_box.pack(side="left", padx=6)
+        self.device_box.bind("<<ComboboxSelected>>", lambda _e: self._load_routes())
+        ttk.Button(top, text="Refresh", command=self._load_routes).pack(side="left", padx=4)
+        self.routes_msg = ttk.Label(top, text="", foreground="gray")
+        self.routes_msg.pack(side="left", padx=10)
+
+        cols = ("started", "duration", "segments", "branch", "rlogs")
+        self.tree = ttk.Treeview(routes_frame, columns=cols, show="headings", selectmode="extended")
+        headings = {
+            "started": ("Started", 150), "duration": ("Duration", 80),
+            "segments": ("Segments", 80), "branch": ("Branch", 130), "rlogs": ("rlogs", 190),
+        }
+        for c in cols:
+            text, width = headings[c]
+            self.tree.heading(c, text=text)
+            self.tree.column(c, width=width, anchor="w")
+        yscroll = ttk.Scrollbar(routes_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=yscroll.set)
+        self.tree.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=4)
+        yscroll.pack(side="left", fill="y", pady=4)
+        self.tree.tag_configure("ready", foreground="#0ca30c")
+        self.tree.tag_configure("partial", foreground="#b8860b")
+        self.tree.tag_configure("none", foreground="gray")
+
+        act = ttk.Frame(self.root)
+        act.pack(fill="x", **pad)
+        self.upload_btn = ttk.Button(
+            act, text="Request upload for selected", command=self._request_upload
+        )
+        self.upload_btn.pack(side="left")
+        self.cell_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(act, text="upload over cell data", variable=self.cell_var).pack(
+            side="left", padx=8
+        )
+        self.upload_msg = ttk.Label(act, text="", foreground="gray")
+        self.upload_msg.pack(side="left", padx=10)
+
+        # local folders
+        local = ttk.LabelFrame(self.root, text="local rlog folders (optional)")
+        local.pack(fill="x", **pad)
+        lrow = ttk.Frame(local)
+        lrow.pack(fill="x", padx=6, pady=4)
+        ttk.Button(lrow, text="Add folder…", command=self._add_folder).pack(side="left")
+        ttk.Button(lrow, text="Remove selected", command=self._remove_folder).pack(side="left", padx=6)
+        self.paths_list = tk.Listbox(local, height=2)
+        self.paths_list.pack(fill="x", padx=6, pady=(0, 6))
+
+        # grade + progress
+        grade = ttk.LabelFrame(self.root, text="grade")
+        grade.pack(fill="x", **pad)
+        grow = ttk.Frame(grade)
+        grow.pack(fill="x", padx=6, pady=4)
+        self.grade_btn = ttk.Button(
+            grow, text="Grade selected drives", command=self._grade
+        )
+        self.grade_btn.pack(side="left")
+        self.progress = ttk.Progressbar(grow, length=280, mode="determinate")
+        self.progress.pack(side="left", padx=10)
+        self.status = ttk.Label(grade, text="select drives above, then grade", foreground="gray")
+        self.status.pack(anchor="w", padx=8, pady=(0, 6))
+
+        # past reports
+        rep = ttk.LabelFrame(self.root, text="past reports (double-click to open)")
+        rep.pack(fill="x", **pad)
+        self.reports_list = tk.Listbox(rep, height=3)
+        self.reports_list.pack(fill="x", padx=6, pady=6)
+        self.reports_list.bind("<Double-Button-1>", self._open_report)
+        self._report_paths: list[str] = []
+
+    # ----------------------------------------------------------------- auth
+
+    def _check_auth(self):
+        self.jwt = C.read_jwt()
+        if not self.jwt:
+            return None
+        try:
+            return C.get_me(self.jwt)
+        except C.ApiError:
+            self.jwt = None
+            return None
+
+    def _on_auth_checked(self, me, err):
+        if me:
+            who = me.get("email") or me.get("user_id") or "signed in"
+            self.auth_label.config(text=f"signed in as {who}")
+            self.token_entry.pack_forget()
+            self.token_save.pack_forget()
+            self.token_help.pack_forget()
+            self._load_devices()
+        else:
+            self.auth_label.config(
+                text="paste a comma JWT to browse your drives (local folders work without one):"
+            )
+            self.token_help.pack(side="right", padx=6, pady=4)
+            self.token_save.pack(side="right", padx=6, pady=4)
+            self.token_entry.pack(side="right", padx=6, pady=4, fill="x", expand=True)
+
+    def _save_token(self):
+        token = self.token_entry.get().strip()
+
+        def save():
+            C.get_me(token)  # validate before writing
+            C.save_jwt(token)
+            return True
+
+        def done(_ok, err):
+            if err:
+                messagebox.showerror("token rejected", str(err))
+            else:
+                self._bg(self._check_auth, self._on_auth_checked)
+
+        self._bg(save, done)
+
+    # --------------------------------------------------------------- routes
+
+    def _load_devices(self):
+        def done(devices, err):
+            if err:
+                self.routes_msg.config(text=str(err))
+                return
+            self.dongles = devices or []
+            names = [
+                f"{d.get('alias') or d.get('device_type') or 'device'} — {d['dongle_id']}"
+                for d in self.dongles
+            ]
+            self.device_box["values"] = names
+            if names:
+                self.device_box.current(0)
+                self._load_routes()
+            else:
+                self.routes_msg.config(text="no devices on this account")
+
+        self._bg(lambda: C.get_devices(self.jwt), done)
+
+    def _current_dongle(self) -> str | None:
+        i = self.device_box.current()
+        return self.dongles[i]["dongle_id"] if 0 <= i < len(self.dongles) else None
+
+    def _load_routes(self):
+        dongle = self._current_dongle()
+        if not dongle or not self.jwt:
+            return
+        self.routes_msg.config(text="loading…")
+
+        def done(raw, err):
+            if err:
+                self.routes_msg.config(text=str(err))
+                return
+            self.routes = sorted(
+                (C.summarize_route(r) for r in raw or []),
+                key=lambda r: -(r["start_utc_millis"] or 0),
+            )
+            self.badges = {}
+            self._render_routes()
+            self.routes_msg.config(text=f"{len(self.routes)} drives")
+            self._fetch_badges()
+
+        self._bg(lambda: C.get_routes(dongle, self.jwt), done)
+
+    def _render_routes(self):
+        selected = set(self.tree.selection())
+        self.tree.delete(*self.tree.get_children())
+        for r in self.routes:
+            b = self.badges.get(r["fullname"])
+            if r["fullname"] in self.pending_uploads and (not b or b["kind"] != "ready"):
+                badge_text, tag = "upload queued (uploads on WiFi)", "partial"
+            elif b:
+                badge_text, tag = b["label"], b["kind"]
+            else:
+                badge_text, tag = "checking…", "none"
+            started = (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(r["start_utc_millis"] / 1000))
+                if r["start_utc_millis"] else "–"
+            )
+            dur = f"{r['duration_s'] / 60:.0f} min" if r["duration_s"] else "–"
+            self.tree.insert(
+                "", "end", iid=r["fullname"], tags=(tag,),
+                values=(started, dur, r["n_segments"] or "–", r["git_branch"], badge_text),
+            )
+        for iid in selected:
+            if self.tree.exists(iid):
+                self.tree.selection_add(iid)
+
+    def _fetch_badges(self):
+        routes = list(self.routes)
+
+        def fetch():
+            for r in routes:
+                try:
+                    files = C.get_route_files(r["fullname"], self.jwt)
+                    badge = C.files_badge(files, r["n_segments"])
+                except Exception:  # noqa: BLE001 - keep going per-route
+                    badge = {"label": "unknown", "kind": "none", "n_logs": 0,
+                             "n_segments": r["n_segments"]}
+                self._post(self._set_badge, r["fullname"], badge)
+            return True
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _set_badge(self, fullname: str, badge: dict):
+        self.badges[fullname] = badge
+        if badge["kind"] == "ready":
+            self.pending_uploads.discard(fullname)
+        self._render_routes()
+
+    # -------------------------------------------------------------- uploads
+
+    def _request_upload(self):
+        sel = self.tree.selection()
+        dongle = self._current_dongle()
+        if not sel or not dongle:
+            self.upload_msg.config(text="select a drive first")
+            return
+        allow_cell = self.cell_var.get()
+        targets = [r for r in self.routes if r["fullname"] in sel]
+        self.upload_msg.config(text="requesting…")
+
+        def work():
+            msgs = []
+            for r in targets:
+                try:
+                    res = C.request_upload(
+                        dongle, r["fullname"], r["n_segments"], self.jwt, allow_cell
+                    )
+                    self.pending_uploads.add(r["fullname"])
+                    msgs.append(f"{r['name']}: {res['message']}")
+                except C.ApiError as e:
+                    msgs.append(f"{r['name']}: {e}")
+            return msgs
+
+        def done(msgs, err):
+            text = str(err) if err else "; ".join(msgs or [])
+            self.upload_msg.config(text=text[:140])
+            self._render_routes()
+            if self.pending_uploads:
+                self.root.after(POLL_UPLOAD_MS, self._poll_pending_uploads)
+
+        self._bg(work, done)
+
+    def _poll_pending_uploads(self):
+        if not self.pending_uploads or not self.jwt:
+            return
+        pending = [r for r in self.routes if r["fullname"] in self.pending_uploads]
+
+        def fetch():
+            for r in pending:
+                try:
+                    files = C.get_route_files(r["fullname"], self.jwt)
+                    badge = C.files_badge(files, r["n_segments"])
+                    self._post(self._set_badge, r["fullname"], badge)
+                except Exception:  # noqa: BLE001
+                    pass
+            return True
+
+        def done(_ok, _err):
+            if self.pending_uploads:
+                self.root.after(POLL_UPLOAD_MS, self._poll_pending_uploads)
+
+        self._bg(fetch, done)
+
+    # -------------------------------------------------------- local folders
+
+    def _add_folder(self):
+        d = filedialog.askdirectory(title="Folder containing rlogs")
+        if d and d not in self.local_paths:
+            self.local_paths.append(d)
+            self.paths_list.insert("end", d)
+
+    def _remove_folder(self):
+        for i in reversed(self.paths_list.curselection()):
+            self.local_paths.pop(i)
+            self.paths_list.delete(i)
+
+    # -------------------------------------------------------------- grading
+
+    def _grade(self):
+        routes = list(self.tree.selection())
+        if not routes and not self.local_paths:
+            messagebox.showinfo(
+                "nothing selected",
+                "Select one or more drives above (with rlogs ready), or add a local folder.",
+            )
+            return
+
+        not_ready, partial = [], []
+        for full in routes:
+            b = self.badges.get(full)
+            if not b or b["n_segments"] == 0 or b["n_logs"] == 0:
+                not_ready.append(full)
+            elif b["n_logs"] < b["n_segments"]:
+                frac = b["n_logs"] / b["n_segments"]
+                (partial if frac >= PARTIAL_OK_FRACTION else not_ready).append(full)
+        if not_ready:
+            messagebox.showwarning(
+                "rlogs not uploaded",
+                "These drives don't have enough rlogs uploaded yet "
+                "(use Request upload first):\n\n"
+                + "\n".join(f.split('|', 1)[-1] for f in not_ready),
+            )
+            return
+        if partial and not messagebox.askyesno(
+            "partial rlogs",
+            "Some selected drives are missing a few segments (≥80% uploaded). "
+            "The report will skip those minutes. Continue?",
+        ):
+            return
+
+        if not self.jobs.try_start(", ".join(routes + self.local_paths)):
+            messagebox.showinfo("busy", "A grading job is already running — wait for it to finish.")
+            return
+        self.grade_btn.config(state="disabled")
+        self.progress.config(mode="indeterminate")
+        self.progress.start(80)
+        threading.Thread(
+            target=C.run_grade_job,
+            args=(self.jobs, routes, list(self.local_paths), self.jwt),
+            daemon=True,
+        ).start()
+        self.root.after(POLL_JOB_MS, self._poll_job)
+
+    def _poll_job(self):
+        j = self.jobs.snapshot()
+        detail = j.get("detail") or ""
+        self.status.config(text=f"{j['phase']} — {detail}" if detail else j["phase"])
+        prog = j.get("progress")
+        if prog:
+            self.progress.stop()
+            self.progress.config(mode="determinate", maximum=max(1, prog[1]), value=prog[0])
+        if j.get("active"):
+            self.root.after(POLL_JOB_MS, self._poll_job)
+            return
+        self.progress.stop()
+        self.progress.config(mode="determinate", value=0)
+        self.grade_btn.config(state="normal")
+        if j["phase"] == "done" and j.get("report"):
+            self.status.config(text=f"report ready: {j['report']}")
+            webbrowser.open(Path(j["report"]).as_uri())
+            self._refresh_reports()
+        elif j["phase"] == "error" and j.get("error"):
+            err = j["error"]
+            self.status.config(text=f"error: {err['message']}")
+            messagebox.showerror(
+                "grading failed",
+                err["message"] + "\n\n" + "\n".join(err.get("traceback") or []),
+            )
+
+    # -------------------------------------------------------------- reports
+
+    def _refresh_reports(self):
+        self.reports_list.delete(0, "end")
+        self._report_paths = []
+        for r in C.list_reports():
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["mtime"]))
+            self.reports_list.insert("end", f"{r['name']}   ({when}, {r['size'] // 1024} KB)")
+            self._report_paths.append(r["path"])
+
+    def _open_report(self, _event):
+        sel = self.reports_list.curselection()
+        if sel:
+            webbrowser.open(Path(self._report_paths[sel[0]]).as_uri())
+
+
+def run() -> None:
+    root = tk.Tk()
+    try:
+        ttk.Style().theme_use("clam")
+    except tk.TclError:
+        pass
+    App(root)
+    root.mainloop()
