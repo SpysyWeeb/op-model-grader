@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import traceback
@@ -392,3 +393,37 @@ def list_reports() -> list[dict]:
             items.append({"name": p.name, "path": str(p),
                           "mtime": st.st_mtime, "size": st.st_size})
     return items
+
+
+def delete_report(path: str) -> None:
+    """Delete a generated report; refuses anything outside the reports dir."""
+    p = Path(path).resolve()
+    if p.parent != REPORTS_DIR.resolve() or p.suffix != ".html":
+        raise ApiError("refusing to delete a file outside the reports folder", status=400)
+    p.unlink(missing_ok=True)
+
+
+def cached_route_dirs() -> list[Path]:
+    """Downloaded-rlog cache directories (everything in CACHE_DIR except reports)."""
+    if not CACHE_DIR.is_dir():
+        return []
+    reports = REPORTS_DIR.resolve()
+    return [d for d in CACHE_DIR.iterdir() if d.is_dir() and d.resolve() != reports]
+
+
+def route_cache_size() -> int:
+    """Total bytes of downloaded rlogs in the cache."""
+    return sum(
+        f.stat().st_size
+        for d in cached_route_dirs()
+        for f in d.rglob("*")
+        if f.is_file()
+    )
+
+
+def clear_route_cache() -> int:
+    """Delete all downloaded rlogs from the cache; returns bytes freed."""
+    freed = route_cache_size()
+    for d in cached_route_dirs():
+        shutil.rmtree(d, ignore_errors=True)
+    return freed

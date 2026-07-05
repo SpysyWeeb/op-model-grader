@@ -185,10 +185,16 @@ class App:
         # past reports
         rep = ttk.LabelFrame(self.root, text="past reports (double-click to open)")
         rep.pack(fill="x", **pad)
-        self.reports_list = tk.Listbox(rep, height=3)
-        self.reports_list.pack(fill="x", padx=6, pady=6)
+        self.reports_list = tk.Listbox(rep, height=3, selectmode="extended")
+        self.reports_list.pack(fill="x", padx=6, pady=(6, 0))
         self.reports_list.bind("<Double-Button-1>", self._open_report)
         self._report_paths: list[str] = []
+        rrow = ttk.Frame(rep)
+        rrow.pack(fill="x", padx=6, pady=(2, 6))
+        ttk.Button(rrow, text="Delete selected", command=self._delete_reports).pack(side="left")
+        self.cache_label = ttk.Label(rrow, text="", foreground="gray")
+        self.cache_label.pack(side="right", padx=(0, 4))
+        ttk.Button(rrow, text="Clear downloaded rlogs", command=self._clear_cache).pack(side="right", padx=6)
 
     # ----------------------------------------------------------------- auth
 
@@ -512,11 +518,64 @@ class App:
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["mtime"]))
             self.reports_list.insert("end", f"{r['name']}   ({when}, {r['size'] // 1024} KB)")
             self._report_paths.append(r["path"])
+        self._bg(
+            C.route_cache_size,
+            lambda size, _err: size is not None
+            and self.cache_label.config(text=f"rlog cache: {size / 1e9:.2f} GB"),
+        )
 
     def _open_report(self, _event):
         sel = self.reports_list.curselection()
         if sel:
             webbrowser.open(Path(self._report_paths[sel[0]]).as_uri())
+
+    def _delete_reports(self):
+        sel = self.reports_list.curselection()
+        if not sel:
+            messagebox.showinfo("delete reports", "select one or more reports to delete first")
+            return
+        names = [Path(self._report_paths[i]).name for i in sel]
+        if not messagebox.askyesno(
+            "Delete reports",
+            f"Delete {len(names)} report(s)?\n\n" + "\n".join(names[:8])
+            + ("\n…" if len(names) > 8 else ""),
+        ):
+            return
+        for i in sel:
+            try:
+                C.delete_report(self._report_paths[i])
+            except C.ApiError as e:
+                messagebox.showerror("delete failed", str(e))
+        self._refresh_reports()
+
+    def _clear_cache(self):
+        def refresh_label(size, _err):
+            if size is not None:
+                self.cache_label.config(text=f"rlog cache: {size / 1e9:.2f} GB")
+
+        def clear():
+            return C.clear_route_cache()
+
+        def done(freed, err):
+            if err:
+                messagebox.showerror("clear cache failed", str(err))
+            else:
+                messagebox.showinfo("cache cleared", f"freed {freed / 1e9:.2f} GB of downloaded rlogs")
+            self._bg(C.route_cache_size, refresh_label)
+
+        size = None
+        try:
+            size = C.route_cache_size()
+        except OSError:
+            pass
+        if not messagebox.askyesno(
+            "Clear downloaded rlogs",
+            "Delete all downloaded rlogs from the cache"
+            + (f" ({size / 1e9:.2f} GB)" if size else "")
+            + "?\n\nReports are kept. Re-grading a drive will re-download its logs.",
+        ):
+            return
+        self._bg(clear, done)
 
 
 def run() -> None:

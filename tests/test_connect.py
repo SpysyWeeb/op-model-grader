@@ -230,3 +230,31 @@ def test_clear_jwt_removes_token_keeps_other_keys(tmp_path, monkeypatch):
     assert connect.read_jwt() is None
     connect.clear_jwt()  # signing out twice is a no-op, not an error
     assert json.loads(f.read_text()) == {"github_key": "keepme"}
+
+
+def test_delete_report_guard_and_cache_clear(tmp_path, monkeypatch):
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    monkeypatch.setattr(connect, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(connect, "REPORTS_DIR", reports)
+
+    rpt = reports / "x.html"
+    rpt.write_text("<html></html>")
+    connect.delete_report(str(rpt))
+    assert not rpt.exists()
+    # outside the reports dir, or wrong extension -> refused
+    outside = tmp_path / "evil.html"
+    outside.write_text("no")
+    with pytest.raises(connect.ApiError):
+        connect.delete_report(str(outside))
+    with pytest.raises(connect.ApiError):
+        connect.delete_report(str(reports / "sneaky.txt"))
+
+    # route cache: dirs other than reports/ count and get cleared
+    route = tmp_path / "dongle|2026-01-01--00-00-00"
+    route.mkdir()
+    (route / "rlog_00.zst").write_bytes(b"z" * 1000)
+    assert connect.route_cache_size() == 1000
+    freed = connect.clear_route_cache()
+    assert freed == 1000
+    assert not route.exists() and reports.exists()
