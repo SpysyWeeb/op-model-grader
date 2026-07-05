@@ -152,6 +152,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"follow adherence ({p}): holds {info['median_eff']:.2f}s vs "
                 f"{tgt:.2f}s target ({pct:.0f}% off, {info['seconds']:.0f}s of data)"
             )
+    sd = analysis.speed_disagreement
+    if sd is not None and sd.overall_rate is not None:
+        mag = f"{sd.overall_magnitude:.2f} m/s²" if sd.overall_magnitude is not None else "n/a"
+        pct = f"{sd.overall_pct:.1f}%" if sd.overall_pct is not None else "n/a"
+        print(
+            f"speed disagreement: {sd.overall_rate:.1f} gas overrides/10min "
+            f"({pct} of model-long time), magnitude {mag}"
+        )
+        top = sd.biggest_context
+        if top:
+            n = next(r["n"] for r in sd.context_table if r["context"] == top)
+            print(f"  biggest context: {top} ({n} of {len(sd.episodes)} episodes)")
     cf = analysis.counterfactual
     if cf is not None and cf.available:
         ts = cf.turn_in_summary()

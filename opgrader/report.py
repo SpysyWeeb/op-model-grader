@@ -38,6 +38,7 @@ KIND_LABELS = {
     "cf_turnin": "Plan vs You: turn-in (manual turns)",
     "cf_brake": "Plan vs You: braking onset (manual stops)",
     "cf_launch": "Plan vs You: launch onset (manual pull-aways)",
+    "gas_override": "Gas overrides (Speed Disagreement)",
 }
 
 KIND_HEADLINE = {
@@ -53,6 +54,7 @@ KIND_HEADLINE = {
     "cf_turnin": ("lag", "plan lag s"),
     "cf_brake": ("lag", "plan lag s"),
     "cf_launch": ("lag", "plan lag s"),
+    "gas_override": ("magnitude", "magnitude m/s²"),
 }
 
 
@@ -124,6 +126,16 @@ def _series_for_event(ev: Event, da: DriveArrays) -> list[dict]:
         if da.d_rel is not None and da.lead_status is not None:
             d = np.where(da.lead_status[sl], da.d_rel[sl], np.nan)
             out.append({"label": "lead distance", "unit": "m", "data": ds(d)})
+    elif ev.kind == "gas_override":
+        out.append({"label": "vEgo", "unit": "m/s", "data": ds(da.v[sl])})
+        out.append({"label": "aEgo", "unit": "m/s²", "data": ds(da.a[sl])})
+        if da.vis_accel is not None:
+            out.append({"label": "planned accel (vision)", "unit": "m/s²", "data": ds(da.vis_accel[sl])})
+        if da.gas_pressed is not None:
+            out.append({"label": "gasPressed", "unit": "", "data": ds(da.gas_pressed[sl].astype(float))})
+        if da.d_rel is not None and da.lead_status is not None:
+            d = np.where(da.lead_status[sl], da.d_rel[sl], np.nan)
+            out.append({"label": "lead distance", "unit": "m", "data": ds(d)})
     elif ev.kind == "intent":
         if da.steering_angle is not None:
             out.append({"label": "steering angle", "unit": "°", "data": ds(da.steering_angle[sl])})
@@ -164,6 +176,10 @@ def _event_payload(ev: Event, da: DriveArrays, t_drive0: float) -> dict:
             tag = (tag + " · NEVER PLANNED").strip(" ·")
         elif ev.values.get("censored"):
             tag = (tag + " · plan never crossed (censored)").strip(" ·")
+    elif ev.kind == "gas_override":
+        tag = str(ev.values.get("context", ""))
+        if ev.values.get("reoverride"):
+            tag += " · re-override"
     return {
         "kind": ev.kind,
         "engaged": ev.engaged,
@@ -635,7 +651,51 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "Ordinary driving above ~22 mph, engaged and manual, on similar roads for "
         "both.",
     ),
+    "Speed Disagreement": (
+        "How often you and the model disagree about speed. An override is you "
+        "pressing the gas while the model controls longitudinal — openpilot keeps "
+        "driving, so every press is a clean 'I want to go faster than this' signal. "
+        "Magnitude is the extra acceleration you demanded beyond the model's plan "
+        "(aEgo minus the vision plan's accel); speed taken back is how much speed "
+        "the model sheds in the 10 s after you lift off — the model fighting your "
+        "cruise speed; re-override is you pressing again within 15 s (persistent "
+        "disagreement); brake disengagements are the opposite direction — you "
+        "braking hard enough to kick the model out. The context table splits "
+        "overrides by situation: launches, plan-was-braking (exp-slowdown), lead "
+        "pulling away, and open road.",
+        "This measures your tolerance as much as the model — override only when "
+        "you actually want more speed; every override is a labeled data point, so "
+        "normal driving is the right input. Compare the personality breakdown: an "
+        "aggressive personality should need fewer overrides from you.",
+    ),
 }
+
+
+def _speed_disagreement_extras(cat: CategoryResult) -> str:
+    sd = cat.extra.get("result") if cat.extra else None
+    if sd is None:
+        return ""
+    parts = []
+    rows = "".join(
+        f"<tr><td>{_esc(r['context'])}</td><td>{r['n']}</td>"
+        f"<td>{_fmt(r['median_magnitude'])}</td></tr>"
+        for r in sd.context_table
+    )
+    if any(r["n"] for r in sd.context_table):
+        parts.append(f"""
+  <table class="mtable">
+    <thead><tr><th>Override context</th><th>Episodes</th><th>Median magnitude (m/s²)</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>""")
+    if sd.brake_rate is not None:
+        bc = sd.brake_context
+        parts.append(
+            f'<p class="muted">Brake disengagements (you braking the model out of control): '
+            f'{_fmt(sd.brake_rate)}/10 min of model-long time — '
+            f'{bc.get("lead_or_stop", 0)} behind a lead or into a stop, '
+            f'{bc.get("free_road", 0)} on a free road.</p>'
+        )
+    return "".join(parts)
 
 
 def _category_card(cat: CategoryResult) -> str:
@@ -658,6 +718,8 @@ def _category_card(cat: CategoryResult) -> str:
                 f'Targets used: {_esc(tgt)} — these are fork-dependent; set yours with '
                 f'--t-follow or the UI.</p>'
             )
+        if cat.name == "Speed Disagreement":
+            body += _speed_disagreement_extras(cat)
     help_html = ""
     if cat.name in CATEGORY_HELP:
         what, data = CATEGORY_HELP[cat.name]
@@ -907,7 +969,7 @@ def render_report(analysis, out_path: str | Path) -> Path:
   else max(0, 50 − 25·(r−2)). Metrics marked * use an absolute anchor scale (documented in their row's
   category) because there is no human counterpart or your baseline is ~zero.
   Letters: ≥93 A, ≥85 A−, ≥78 B+, ≥70 B, ≥60 C, ≥50 D, else F. Ratio metrics need ≥3 events per side.
-  Longitudinal weights: Smoothness 0.30, Following 0.20, Stopping 0.20, Launch 0.17, Responsiveness 0.13.
+  Longitudinal weights: Smoothness 0.25, Following 0.18, Stopping 0.17, Launch 0.15, Responsiveness 0.10, Speed Disagreement 0.15.
   Lateral weights: Ping-Pong 0.40, Turn Execution 0.30, Turn-In Timing 0.20, General Smoothness 0.10.
   Overall = ½ Longitudinal + ½ Lateral; empty categories/groups are dropped and weights renormalized.</p>
   <p><strong>Longitudinal definitions.</strong> Jerk = d(aEgo)/dt after a centered 0.3 s moving average.
@@ -916,7 +978,14 @@ def render_report(analysis, out_path: str | Path) -> Path:
   Follow: lead &lt; 80 m, vEgo &gt; 8 m/s, ≥ 15 s. Lead decel stimulus: aLeadK &lt; −1.2 m/s²
   for ≥ 0.4 s; response = own smoothed accel drops 0.3 m/s² (≤ 4 s, censored).
   Pull-away: lead &lt; 12 m from standstill, vLead &gt; 0.5 m/s; go = vEgo &gt; 0.15 or aEgo &gt; 0.2 (≤ 6 s).
-  Engaged moments with gas/brake override are excluded from the model side.</p>
+  Engaged moments with gas/brake override are excluded from the model side.
+  <strong>Speed Disagreement</strong>: gas-override episode = gasPressed while the model controls
+  longitudinal (gaps &lt; 1 s merged, ≥ 0.3 s). openpilot drops longActive during a gas override while
+  staying enabled, so the control mask used is longActive OR (enabled AND gasPressed); rates are per
+  time under that mask. Magnitude = median (aEgo − vision-plan accel) over the episode; brake
+  disengagement = the model losing longitudinal control with brakePressed within ±0.5 s. Scored on
+  absolute anchors (rate 0/4/8 per 10 min → 100/50/0; time 0/10/25%; magnitude 0.2/1.0/2.0 m/s²) —
+  there is no human baseline for overriding yourself.</p>
   <p><strong>Mode &amp; personality.</strong> Experimental/chill mode and the longitudinal
   personality are tracked per sample (they change mid-drive). Events keep their tag only when
   ≥90% of the window agrees; mixed events count toward the overall grades but are excluded
