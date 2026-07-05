@@ -39,7 +39,7 @@ from .segments import Segmentation, _contiguous_runs
 
 MIN_EVENTS = 3
 
-GROUP_WEIGHTS = {"Longitudinal": 0.5, "Lateral": 0.5}
+GROUP_WEIGHTS = {"Lateral": 0.5, "Longitudinal": 0.5}
 
 # longitudinal breakdown buckets (mode and personality tracked separately);
 # events tagged "mixed"/"unknown" stay in the overall grade but are excluded
@@ -49,6 +49,12 @@ PERSONALITY_BUCKETS = ("aggressive", "standard", "relaxed")
 ALL_BUCKETS = MODE_BUCKETS + PERSONALITY_BUCKETS
 
 CATEGORY_GROUPS = {
+    "Lateral": {
+        "Ping-Pong": 0.40,
+        "Turn Execution": 0.30,
+        "Turn-In Timing": 0.20,
+        "General Smoothness": 0.10,
+    },
     "Longitudinal": {
         "Smoothness": 0.25,
         "Following": 0.18,
@@ -56,12 +62,6 @@ CATEGORY_GROUPS = {
         "Launch": 0.15,
         "Responsiveness": 0.10,
         "Speed Disagreement": 0.15,
-    },
-    "Lateral": {
-        "Ping-Pong": 0.40,
-        "Turn Execution": 0.30,
-        "Turn-In Timing": 0.20,
-        "General Smoothness": 0.10,
     },
 }
 
