@@ -50,12 +50,34 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="open the simple desktop UI (browse drives, request uploads, grade)",
     )
+    p.add_argument(
+        "--no-profile",
+        action="store_true",
+        help="don't load or save the local driver-baseline profile for this run "
+        "(grade in isolation; the profile file is left untouched)",
+    )
+    p.add_argument(
+        "--clear-profile",
+        action="store_true",
+        help="delete the local driver-baseline profile (standalone action -- "
+        "does not grade anything)",
+    )
+    p.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the confirmation prompt for --clear-profile",
+    )
     p.add_argument("--version", action="version", version=f"opgrader {__version__}")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.clear_profile:
+        from . import profile as P
+
+        return P.clear_profile_cli(yes=args.yes)
 
     from .config import resolve_t_follow
 
@@ -124,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no usable drives decoded", file=sys.stderr)
         return 1
 
-    analysis = analyze(per_drive, t_follow_targets=t_follow)
+    analysis = analyze(per_drive, t_follow_targets=t_follow, use_profile=not args.no_profile)
     grades = analysis.grades
 
     for _d, _s, _a, events in per_drive:
@@ -138,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     out = render_report(analysis, args.out)
+    if analysis.profile_summary is not None:
+        for line in analysis.profile_summary.lines():
+            print(f"driver profile: {line}")
     if analysis.model_id and analysis.model_id.get("provenance") != "unknown":
         print(f"driving model: {analysis.model_id['label']} ({analysis.model_id['provenance']})")
     if analysis.bucket_times:

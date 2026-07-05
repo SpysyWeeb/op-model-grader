@@ -50,6 +50,7 @@ class App:
         root.after(50, self._pump)
         self._bg(self._check_auth, self._on_auth_checked)
         self._refresh_reports()
+        self._refresh_profile()
 
     # ------------------------------------------------------------ threading
     # Worker threads never touch Tk directly: they enqueue callbacks that the
@@ -187,6 +188,16 @@ class App:
             self.tf_vars[p] = var
         ttk.Label(tf, text="  (fork-dependent; stock: 1.25 / 1.45 / 1.75)",
                   foreground="gray").pack(side="left")
+        prow = ttk.Frame(grade)
+        prow.pack(fill="x", padx=6, pady=(0, 4))
+        self.profile_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            prow, text="use driver profile for baselines", variable=self.profile_var
+        ).pack(side="left")
+        ttk.Label(
+            prow, text="  (pools your manual driving across routes for a steadier baseline)",
+            foreground="gray",
+        ).pack(side="left")
         grow = ttk.Frame(grade)
         grow.pack(fill="x", padx=6, pady=4)
         self.grade_btn = ttk.Button(
@@ -197,6 +208,17 @@ class App:
         self.progress.pack(side="left", padx=10)
         self.status = ttk.Label(grade, text="select drives above, then grade", foreground="gray")
         self.status.pack(anchor="w", padx=8, pady=(0, 6))
+
+        # driver profile panel
+        prof = ttk.LabelFrame(self.root, text="driver profile")
+        prof.pack(fill="x", **pad)
+        prow2 = ttk.Frame(prof)
+        prow2.pack(fill="x", padx=6, pady=6)
+        self.profile_label = ttk.Label(prow2, text="checking…", foreground="gray")
+        self.profile_label.pack(side="left")
+        ttk.Button(
+            prow2, text="Delete driver profile", command=self._delete_profile
+        ).pack(side="right")
 
         # past reports
         rep = ttk.LabelFrame(self.root, text="past reports (double-click to open)")
@@ -521,7 +543,7 @@ class App:
         self.progress.start(80)
         threading.Thread(
             target=C.run_grade_job,
-            args=(self.jobs, routes, local_paths, self.jwt, targets),
+            args=(self.jobs, routes, local_paths, self.jwt, targets, self.profile_var.get()),
             daemon=True,
         ).start()
         self.root.after(POLL_JOB_MS, self._poll_job)
@@ -544,6 +566,7 @@ class App:
             self.status.config(text=f"report ready: {j['report']}")
             webbrowser.open(Path(j["report"]).as_uri())
             self._refresh_reports()
+            self._refresh_profile()
         elif j["phase"] == "error" and j.get("error"):
             err = j["error"]
             self.status.config(text=f"error: {err['message']}")
@@ -619,6 +642,40 @@ class App:
         ):
             return
         self._bg(clear, done)
+
+    # ------------------------------------------------------------- profile
+
+    def _refresh_profile(self):
+        def load():
+            from . import profile as P
+
+            return P.current_summary()
+
+        def done(summary, err):
+            if err or summary is None or summary.empty:
+                self.profile_label.config(text="no profile yet")
+            else:
+                self.profile_label.config(text="; ".join(summary.lines()))
+
+        self._bg(load, done)
+
+    def _delete_profile(self):
+        from . import profile as P
+
+        store = P.load_store()
+        if not store.get("fingerprints"):
+            messagebox.showinfo("driver profile", "there is no driver profile to delete.")
+            return
+        detail = "\n".join(P.describe_store(store))
+        if not messagebox.askyesno(
+            "Delete driver profile",
+            "Permanently delete the local driver-baseline profile?\n\n"
+            f"{detail}\n\nFuture grades will start with an empty baseline pool "
+            "again (this run's own manual driving still grades normally).",
+        ):
+            return
+        P.delete_profile()
+        self._refresh_profile()
 
 
 def run() -> None:

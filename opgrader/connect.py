@@ -294,7 +294,7 @@ def _slug(parts: list[str]) -> str:
 
 
 def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str | None,
-                  t_follow_targets: dict | None = None):
+                  t_follow_targets: dict | None = None, use_profile: bool = True):
     """Download missing rlogs, run the pipeline, write the report.
 
     Meant to run in a background thread; never raises (failures land in the
@@ -373,7 +373,7 @@ def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str
             from .config import get_t_follow
 
             t_follow_targets = get_t_follow()
-        analysis = analyze(per_drive, t_follow_targets=t_follow_targets)
+        analysis = analyze(per_drive, t_follow_targets=t_follow_targets, use_profile=use_profile)
 
         job.update(phase="rendering", detail="writing report")
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
