@@ -61,6 +61,8 @@ class DriveArrays:
     a_smooth: np.ndarray
     long_override: np.ndarray  # gas/brake pressed while model controls long
     lat_override: np.ndarray  # steeringPressed while model controls lat
+    gas_pressed: np.ndarray | None  # bool: raw carState.gasPressed (any control state)
+    brake_pressed: np.ndarray | None  # bool: raw carState.brakePressed (any control state)
     enabled: np.ndarray  # bool (single flag, reference only)
     lat_model: np.ndarray  # bool: model steering (AOL/MADS aware)
     long_model: np.ndarray  # bool: model gas/brake
@@ -150,6 +152,8 @@ def build_arrays(drive: Drive, seg: Segmentation) -> DriveArrays:
         a_smooth=smooth(t, a),
         long_override=seg.long_override,
         lat_override=seg.lat_override,
+        gas_pressed=b("gasPressed"),
+        brake_pressed=b("brakePressed"),
         enabled=seg.enabled,
         lat_model=seg.lat_model,
         long_model=seg.long_model,
