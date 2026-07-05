@@ -213,6 +213,7 @@ function canSelect(r) {
 
 function renderRoutes() {
   const tb = $('routesTable').querySelector('tbody');
+  const checked = new Set(Array.from(document.querySelectorAll('.routeCb:checked')).map(cb => cb.dataset.route));
   tb.innerHTML = '';
   $('routesEmpty').classList.toggle('hidden', state.routes.length > 0);
   for (const r of state.routes) {
@@ -220,7 +221,8 @@ function renderRoutes() {
     const tr = document.createElement('tr');
     const started = r.start_utc_millis ? new Date(r.start_utc_millis).toLocaleString() : '–';
     tr.innerHTML =
-      '<td><input type="checkbox" class="routeCb" data-route="' + r.fullname + '"' + (sel.ok ? '' : ' disabled') + '></td>' +
+      '<td><input type="checkbox" class="routeCb" data-route="' + r.fullname + '"' +
+        (sel.ok ? '' : ' disabled') + (sel.ok && checked.has(r.fullname) ? ' checked' : '') + '></td>' +
       '<td>' + started + '</td>' +
       '<td>' + fmtDur(r.duration_s) + '</td>' +
       '<td>' + (r.n_segments || '–') + '</td>' +
