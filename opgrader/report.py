@@ -400,6 +400,13 @@ def _lagfmt(v, digits=2) -> str:
 
 
 def _counterfactual_section(cf) -> str:
+    data_tip = (
+        '<p class="muted cathelp"><b>Getting good data for this section:</b> it is '
+        'computed from YOUR driving, so it grows every mile you drive manually. Most '
+        'valuable: signaled low-speed turns, red-light/stop-sign approaches without a '
+        'car ahead, launches when a light turns green, and normal cruising — the plan '
+        'is recorded alongside whether you followed it or not.</p>'
+    )
     if cf is None or not cf.available:
         why = getattr(cf, "why_unavailable", "") if cf is not None else ""
         if why:
@@ -524,6 +531,7 @@ def _counterfactual_section(cf) -> str:
   indicative only — the plan is conditioned on the situation you created. These numbers are NOT
   part of the grades above.</div>
   {''.join(parts)}
+  {data_tip}
 </section>"""
 
 
@@ -535,6 +543,99 @@ def _grade_class(score) -> str:
     if score >= 60:
         return "gmid"
     return "gbad"
+
+
+# Plain-language help rendered under every category card: what the numbers
+# mean, and how to drive to collect good data for that grade.
+CATEGORY_HELP: dict[str, tuple[str, str]] = {
+    "Smoothness": (
+        "Jerk is how fast acceleration changes — the head-toss feel. RMS jerk is the "
+        "typical level (higher = jerkier); P95 |jerk| is how bad the worst moments get; "
+        "accel reversals counts throttle↔brake flip-flops per minute (speed hunting); "
+        "time |accel| > 2 is the share of genuinely hard acceleration or braking.",
+        "Any driving counts. For a fair grade, drive the same kinds of roads manually "
+        "that you let the model drive — a model graded on city streets against your "
+        "highway cruising will look worse than it is.",
+    ),
+    "Following": (
+        "Median time gap is the following distance in seconds behind the lead; gap "
+        "hunting is how much that gap oscillates once the overall trend is removed "
+        "(creep-up/fall-back cycles); follow-adherence rows compare the model's held "
+        "gap to what the active personality is tuned to hold.",
+        "Best data: 30+ seconds of steady following behind one car above ~18 mph, "
+        "without stop-and-go — both engaged and while you drive. Adherence needs the "
+        "model actually controlling gas/brake behind a lead.",
+    ),
+    "Stopping": (
+        "Peak decel is the hardest braking moment of an approach; peak-decel timing is "
+        "where in the approach it happens (earlier = braking front-loaded, later = a "
+        "late hard squeeze); stop lurch is the jolt in the last 2 seconds — the classic "
+        "end-of-stop head-nod; |accel| at 0.2 m/s is how hard the brakes still bite at "
+        "walking pace.",
+        "Complete stops from ~18+ mph. Let the model finish stops without touching the "
+        "pedals (a gas/brake tap removes that stop from its data), and make some full "
+        "manual stops too — they are the baseline being compared against.",
+    ),
+    "Launch": (
+        "Time to 5 m/s is 0→11 mph from standstill; peak |jerk| in launch is how "
+        "abrupt the getaway is.",
+        "Standstill-to-rolling starts with no gas pedal help for the model side, and "
+        "normal manual launches for your baseline. Launches behind a lead also feed "
+        "the pull-away latency metric.",
+    ),
+    "Responsiveness": (
+        "Reaction stopwatches. Lead-decel response latency: when the radar sees the "
+        "lead braking meaningfully, how many seconds until this car backs off. "
+        "Pull-away latency: lead starts moving → this car starts moving. NOTE: your "
+        "own latency is often measured long — you anticipate (brake lights up ahead, a "
+        "changing light) and have usually responded before the lead's deceleration is "
+        "even measurable, so the clock starts after you already acted. A fast model "
+        "number is genuinely good; a slow human number mostly means you react to "
+        "earlier cues than radar decel. Don't read model-beats-you here as you being "
+        "slow.",
+        "Needs following situations where the lead visibly brakes or pulls away — "
+        "ordinary traffic provides these; more time spent following = better data.",
+    ),
+    "Ping-Pong": (
+        "Steering-wheel oscillation by speed range. Oscillation RMS is the wobble left "
+        "over after the intended maneuver is removed (degrees of wheel); reversal rate "
+        "is direction flips per minute bigger than 3°. Each speed bin is scored "
+        "against your own steering in that same bin; the worst bin is called out.",
+        "Hands-off engaged (or AOL) steering at a variety of speeds — touching the "
+        "wheel excludes those moments from the model's data. Low-speed creep (parking "
+        "lots, drive-thrus) fills the 1–10 mph bins where ping-pong is worst; note "
+        "your own low-speed manual maneuvering naturally raises the human baseline "
+        "there.",
+    ),
+    "Turn Execution": (
+        "How turns finish. S-curve overshoot: after straightening, how far the wheel "
+        "swings past center the other way (as % of the turn's peak angle); recovery "
+        "wobbles counts extra swings; unwind rate is how quickly the wheel comes back "
+        "after the apex; driver-rescue rate is the share of model turns where you had "
+        "to grab the wheel (or it disengaged) during the straighten-out.",
+        "When it's safe, let the model finish turns on its own — every rescue is "
+        "itself a data point, so intervening when needed still counts. Manual sharp "
+        "turns build the baseline it's compared against.",
+    ),
+    "Turn-In Timing": (
+        "Blinker below 20 mph opens a turn-intent window. Turn-in delay is "
+        "blinker-to-steering time for turns the model executed; missed turn-ins are "
+        "windows where YOU had to start the turn (or it disengaged) — the 'it never "
+        "planned to turn' case.",
+        "Signal consistently a few seconds before low-speed turns, then give the "
+        "model a beat to act before rescuing it. Manual signaled turns (without "
+        "AOL/MADS steering) build the delay baseline; with always-on lateral there "
+        "may be none, so this grade leans on the missed-rate.",
+    ),
+    "General Smoothness": (
+        "Overall steering comfort at speed: RMS lateral jerk is side-to-side "
+        "smoothness felt by passengers; steering rate RMS is how fast the wheel is "
+        "being moved above ~22 mph; steering reversals is wheel sawing per minute; "
+        "time |lat accel| > 3 is the share of hard cornering.",
+        "Ordinary driving above ~22 mph, engaged and manual, on similar roads for "
+        "both.",
+    ),
+}
 
 
 def _category_card(cat: CategoryResult) -> str:
@@ -557,6 +658,13 @@ def _category_card(cat: CategoryResult) -> str:
                 f'Targets used: {_esc(tgt)} — these are fork-dependent; set yours with '
                 f'--t-follow or the UI.</p>'
             )
+    help_html = ""
+    if cat.name in CATEGORY_HELP:
+        what, data = CATEGORY_HELP[cat.name]
+        help_html = (
+            f'<p class="muted cathelp"><b>What these numbers mean:</b> {_esc(what)}</p>'
+            f'<p class="muted cathelp"><b>Getting good data for this grade:</b> {_esc(data)}</p>'
+        )
     return f"""
 <div class="card {_grade_class(cat.score)}">
   <div class="cathead"><h3>{_esc(cat.name)}</h3>
@@ -564,6 +672,7 @@ def _category_card(cat: CategoryResult) -> str:
   </div>
   <div class="catweight">weight {cat.weight:.2f} within group</div>
   {body}
+  {help_html}
 </div>"""
 
 
@@ -868,6 +977,7 @@ h3{font-size:1rem;margin:0;display:inline}
 a{color:var(--model)}
 .sub{color:var(--ink2);margin:.2em 0 1em}
 .muted{color:var(--muted);font-weight:normal;font-size:.85em}
+.cathelp{margin:8px 4px 2px;line-height:1.45}
 .warn{background:color-mix(in srgb, var(--warnc) 14%, var(--surface));border:1px solid var(--warnc);
   border-radius:8px;padding:10px 14px;margin:10px 0;font-size:.95em}
 .notes{color:var(--muted);font-size:.85em;margin-top:8px}
