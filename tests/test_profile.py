@@ -100,11 +100,13 @@ def test_poolable_keys_derived_from_metrics_table():
     for k in ("rms_jerk", "median_gap", "s_overshoot",
               "recovery_wobbles", "unwind_rate", "stop_lurch"):
         assert k in keys
-    # turn_in_delay was retired (Turn-In Timing is now blinker-free, sourced
-    # from TurnEpisode's model-internal cmd_onset_lead/never_commanded, which
-    # are needs_driver=False and so never poolable in the first place)
+    # turn_in_delay and missed_turn_in were both retired (Turn-In Timing is
+    # now blinker-free and scores resisted_divergence, sourced from
+    # TurnEpisode's model-internal fields, all needs_driver=False and so
+    # never poolable in the first place)
     assert "turn_in_delay" not in keys
-    for k in ("rescue_rate", "missed_turn_in", "curve_s_overshoot",
+    assert "missed_turn_in" not in keys
+    for k in ("rescue_rate", "resisted_divergence", "curve_s_overshoot",
               "cmd_unwind_lead_left", "cmd_onset_lead_right"):
         assert k not in keys
     # derived, not hand-typed: exactly matches the needs_driver/scorer filter

@@ -15,6 +15,7 @@ from .grading import (
     collect_samples,
     grade,
     score_ratio,
+    turn_in_breakdown,
 )
 from .lateral import (
     IntentWindow,
@@ -136,6 +137,8 @@ def _turn_event(ep: TurnEpisode, da: DriveArrays) -> Event:
             "unwind_rate": ep.unwind_rate,
             "rescued": ep.rescued,
             "wobbles": ep.wobbles,
+            "initiator": ep.initiator,
+            "divergence_deg": ep.divergence_deg,
         },
     )
 
@@ -261,5 +264,6 @@ def analyze(
         t_follow_targets=an.t_follow_targets,
         speed_disagreement_extra={"result": an.speed_disagreement} if an.speed_disagreement else None,
         profile_info=profile_info,
+        turn_in_extra={"breakdown": turn_in_breakdown(an.turns)},
     )
     return an

@@ -10,6 +10,7 @@ from opgrader.grading import (
     letter,
     score_absolute,
     score_ratio,
+    turn_in_breakdown,
 )
 from opgrader.lateral import TurnEpisode
 
@@ -20,15 +21,17 @@ def empty_samples():
 
 def _ep(engaged=True, sharp=True, contaminated=False, rescued=False,
         never_commanded=False, cmd_onset_lead=None, cmd_unwind_lead=None,
+        initiator="unknown", divergence_deg=None, conflict_ceiling=None,
         side="left", i=(0, 1)):
-    """Minimal TurnEpisode for add_turn_samples wiring tests."""
+    """Minimal TurnEpisode for add_turn_samples/turn_in_breakdown wiring tests."""
     return TurnEpisode(
         engaged=engaged, drive="synth", side=side, sharp=sharp,
         band="90-150" if sharp else "20-90", i0=i[0], i1=i[1],
         t_onset=0.0, v_onset=5.0, peak_act=120.0 if side == "left" else -120.0,
         peak_cmd=None, t_peak_act=1.0, contaminated=contaminated, rescued=rescued,
         never_commanded=never_commanded, cmd_onset_lead=cmd_onset_lead,
-        cmd_unwind_lead=cmd_unwind_lead,
+        cmd_unwind_lead=cmd_unwind_lead, initiator=initiator,
+        divergence_deg=divergence_deg, conflict_ceiling=conflict_ceiling,
     )
 
 
@@ -188,29 +191,59 @@ def test_cmd_onset_lead_scored_metric_defs():
         assert d.abs_anchors == (0.0, 0.5, 1.5)
 
 
-def test_missed_turn_in_counts_only_engaged_sharp_never_commanded():
+def test_resisted_divergence_only_from_conflict_episodes():
+    """No conflict window -> no divergence -> contributes NOTHING (not a
+    zero), same as cmd_onset_lead. Band-agnostic: curve episodes count too.
+    Driver-side (manual) episodes never contribute (needs_driver=False,
+    model-internal metric)."""
     turns = [
-        _ep(engaged=True, sharp=True, never_commanded=True),   # counts: 100
-        _ep(engaged=True, sharp=True, never_commanded=False),  # counts: 0
-        _ep(engaged=True, sharp=False, never_commanded=True),  # curve turn: excluded
-        _ep(engaged=False, sharp=True, never_commanded=True),  # driver side: excluded
+        _ep(engaged=True, sharp=True, divergence_deg=75.0),    # counts
+        _ep(engaged=True, sharp=True, divergence_deg=None),    # no conflict: excluded
+        _ep(engaged=True, sharp=False, divergence_deg=40.0),   # curve turn: still counts
+        _ep(engaged=False, sharp=True, divergence_deg=90.0),   # driver side: excluded
     ]
     samples = empty_samples()
     add_turn_samples(samples, turns)
-    assert samples["missed_turn_in"]["model"] == [100.0, 0.0]
+    assert samples["resisted_divergence"]["model"] == [75.0, 40.0]
 
 
-def test_missed_turn_in_not_gated_by_contaminated():
-    """Contamination (the driver forcing the wheel) is exactly the mechanism
-    by which "the model never commanded this turn" shows up in practice --
-    gating missed_turn_in on it would exclude the cases it exists to catch."""
+def test_resisted_divergence_not_gated_by_contaminated():
+    """Sustained driver resistance IS the contamination mechanism -- gating
+    on it would exclude the cases this metric exists to catch."""
     turns = [
-        _ep(engaged=True, sharp=True, never_commanded=True, contaminated=True),
-        _ep(engaged=True, sharp=True, never_commanded=True, rescued=True),
+        _ep(engaged=True, divergence_deg=200.0, contaminated=True),
+        _ep(engaged=True, divergence_deg=150.0, rescued=True),
     ]
     samples = empty_samples()
     add_turn_samples(samples, turns)
-    assert samples["missed_turn_in"]["model"] == [100.0, 100.0]
+    assert samples["resisted_divergence"]["model"] == [200.0, 150.0]
+
+
+def test_resisted_divergence_anchor_scores():
+    samples = empty_samples()
+    samples["resisted_divergence"]["model"] = [75.0, 75.0, 75.0]  # exactly the 50-point anchor
+    rep = grade(samples)
+    m = next(m for c in rep.categories for m in c.metrics if m.definition.key == "resisted_divergence")
+    assert m.model_agg == pytest.approx(75.0)
+    assert m.score == pytest.approx(50.0)
+
+
+def test_turn_in_breakdown_buckets_by_initiator_and_ceiling():
+    turns = [
+        _ep(engaged=True, initiator="model", divergence_deg=None),  # no conflict
+        _ep(engaged=True, initiator="driver", divergence_deg=90.0, conflict_ceiling=True),
+        _ep(engaged=True, initiator="driver", divergence_deg=30.0, conflict_ceiling=False),
+        _ep(engaged=True, initiator="lag", divergence_deg=200.0, conflict_ceiling=None),
+        _ep(engaged=False, initiator="unknown", divergence_deg=500.0),  # manual: excluded entirely
+    ]
+    bd = turn_in_breakdown(turns)
+    assert bd["model"]["n"] == 1 and bd["model"]["n_conflict"] == 0
+    assert bd["driver"]["n"] == 2 and bd["driver"]["n_conflict"] == 2
+    assert bd["driver"]["ceiling_true"] == 1 and bd["driver"]["ceiling_false"] == 1
+    assert bd["driver"]["median_divergence"] == pytest.approx(60.0)  # median(90, 30)
+    assert bd["lag"]["n"] == 1 and bd["lag"]["ceiling_unknown"] == 1
+    assert bd["lag"]["median_divergence"] == pytest.approx(200.0)
+    assert bd["unknown"]["n"] == 0  # the manual episode never entered any bucket
 
 
 def test_cmd_onset_lead_excluded_when_contaminated_or_rescued():
@@ -237,10 +270,3 @@ def test_cmd_onset_lead_anchor_scores():
     assert res["cmd_onset_lead_right"].score == pytest.approx(75.0)
 
 
-def test_missed_turn_in_anchor_scoring_unchanged_shape():
-    samples = empty_samples()
-    samples["missed_turn_in"]["model"] = [100.0, 0.0, 0.0, 0.0]  # 25% missed
-    rep = grade(samples)
-    m = next(m for c in rep.categories for m in c.metrics if m.definition.key == "missed_turn_in")
-    assert m.model_agg == pytest.approx(25.0)
-    assert m.score == pytest.approx(50.0)

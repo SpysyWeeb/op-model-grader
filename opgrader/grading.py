@@ -147,14 +147,17 @@ METRICS: list[MetricDef] = [
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
     MetricDef("cmd_unwind_lead_right", "Cmd-vs-actual unwind lead (right)", "Turn Execution", "s",
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
-    # ---- Lateral / Turn-In Timing (per sharp low-speed turn episode,
-    # signaled or not -- blinker-free, sourced from the same TurnEpisodes
-    # Turn Execution uses; see add_turn_samples)
+    # ---- Lateral / Turn-In Timing (per engaged turn episode, sharp or
+    # curve-band, signaled or not -- blinker-free, sourced from the same
+    # TurnEpisodes Turn Execution uses; see add_turn_samples)
     MetricDef(
-        "missed_turn_in", "Missed turn-ins", "Turn-In Timing", "%",
-        agg="mean", scorer="abs", abs_anchors=(0.0, 25.0, 50.0), needs_driver=False,
-        note="absolute scale: 100 at 0%, 50 at 25%, 0 at ≥50% of engaged sharp turns "
-        "where the model's own commanded path never called for the turn at all",
+        "resisted_divergence", "Cmd-vs-actual divergence while you resisted", "Turn-In Timing", "deg",
+        scorer="abs", abs_anchors=(15.0, 75.0, 300.0), needs_driver=False,
+        note="absolute scale: 100 at <=15°, 50 at 75°, 0 at >=300° peak |actual - commanded| angle "
+        "during a sustained (>=0.3s) window where you genuinely resisted the model's own steering "
+        "torque -- only scored on episodes with real, sustained disagreement. Anchors set from the "
+        "real-data divergence distribution across two Palisade routes (35 conflict episodes: median "
+        "~79°, p90 ~337°, max 823° on one genuine multi-second tug-of-war) -- see report footer",
     ),
     MetricDef(
         "cmd_onset_lead_left", "Cmd-vs-actual onset lead (left)", "Turn-In Timing", "s",
@@ -447,13 +450,16 @@ def add_turn_samples(samples: dict, turns) -> None:
     model's own unwind/onset, they're a human-forced one. Rescue itself is
     the rescue_rate signal.
 
-    missed_turn_in is the one exception: it is NOT gated on contaminated,
-    because contamination -- the driver forcing the wheel through a turn --
-    is exactly the mechanism by which "the model's own plan never called for
-    this turn" (never_commanded) shows up in practice. Gating it the same
-    way as the others would exclude precisely the cases it exists to catch,
-    making the rate vacuous. This category is blinker-free: every sharp
-    low-speed turn counts, signaled or not (see lateral.detect_turn_episodes).
+    resisted_divergence is the one exception: it is NOT gated on
+    contaminated/rescued, because sustained driver resistance against the
+    model's own steering IS the contamination mechanism -- gating it the
+    same way as the others would exclude precisely the cases it exists to
+    catch. It only scores episodes where lateral.detect_turn_episodes found
+    a genuine, sustained (>=0.3s) directional conflict (steering torque
+    opposing the model's own commanded torque); an episode with no such
+    conflict contributes nothing (not a zero), same as cmd_onset_lead. This
+    category is blinker-free and band-agnostic: every engaged turn counts,
+    sharp or curve, signaled or not (see lateral.detect_turn_episodes).
     """
 
     def add(key, side, value):
@@ -467,8 +473,8 @@ def add_turn_samples(samples: dict, turns) -> None:
             # up to the peak (driver forcing the wheel earlier is a different
             # failure, measured by turn-in metrics)
             add("rescue_rate", "model", 100.0 if ep.rescued else 0.0)
-        if ep.engaged and ep.sharp:
-            add("missed_turn_in", "model", 100.0 if ep.never_commanded else 0.0)
+        if ep.engaged:
+            add("resisted_divergence", "model", ep.divergence_deg)
         if ep.engaged and (ep.contaminated or ep.rescued):
             continue
         # sharp turns feed the scored metrics; 20-90 deg curve episodes are
@@ -482,6 +488,41 @@ def add_turn_samples(samples: dict, turns) -> None:
             add(f"cmd_unwind_lead_{ep.side}", "model", ep.cmd_unwind_lead)
         if ep.engaged and ep.cmd_onset_lead is not None:
             add(f"cmd_onset_lead_{ep.side}", "model", ep.cmd_onset_lead)
+
+
+INITIATOR_BUCKETS = ("model", "driver", "lag", "unknown")
+
+
+def turn_in_breakdown(turns) -> dict[str, dict]:
+    """Unscored Turn-In Timing texture: every engaged episode by initiator
+    (who moved first -- descriptive only, never gates scoring), with the
+    conflict/divergence data resisted_divergence actually scores from, and
+    torque-ceiling status as pure diagnostic context (was the model already
+    at its output limit -- never a scoring gate, see lateral.py)."""
+    buckets = {
+        b: {"n": 0, "n_conflict": 0, "divergences": [],
+            "ceiling_true": 0, "ceiling_false": 0, "ceiling_unknown": 0}
+        for b in INITIATOR_BUCKETS
+    }
+    for ep in turns:
+        if not ep.engaged:
+            continue
+        bucket = buckets[ep.initiator if ep.initiator in INITIATOR_BUCKETS else "unknown"]
+        bucket["n"] += 1
+        if ep.divergence_deg is None:
+            continue
+        bucket["n_conflict"] += 1
+        bucket["divergences"].append(ep.divergence_deg)
+        if ep.conflict_ceiling is True:
+            bucket["ceiling_true"] += 1
+        elif ep.conflict_ceiling is False:
+            bucket["ceiling_false"] += 1
+        else:
+            bucket["ceiling_unknown"] += 1
+    for bucket in buckets.values():
+        divs = bucket.pop("divergences")
+        bucket["median_divergence"] = float(np.median(divs)) if divs else None
+    return buckets
 
 
 # ------------------------------------------------------------------ grading
@@ -705,6 +746,7 @@ def grade(
     t_follow_targets: dict | None = None,
     speed_disagreement_extra: dict | None = None,
     profile_info: dict | None = None,
+    turn_in_extra: dict | None = None,
 ) -> GradeReport:
     cats: dict[str, CategoryResult] = {}
     for grp, weights in CATEGORY_GROUPS.items():
@@ -742,6 +784,9 @@ def grade(
     if sd is not None:
         cats["Speed Disagreement"].metrics.extend(speed_disagreement_results(sd))
         cats["Speed Disagreement"].extra.update(speed_disagreement_extra)
+
+    if turn_in_extra:
+        cats["Turn-In Timing"].extra.update(turn_in_extra)
 
     for cat in cats.values():
         scored = [m.score for m in cat.metrics if m.score is not None]
