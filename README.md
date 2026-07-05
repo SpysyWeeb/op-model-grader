@@ -30,6 +30,16 @@ start_windows.bat       # Windows (or double-click it in Explorer)
 Run a launcher with arguments to use the CLI instead of the UI, e.g.
 `./start_linux.sh testdata/demo -o report.html`.
 
+**Windows + downloaded a ZIP instead of `git clone`?** The first time you run
+`start_windows.bat`, you'll get an "Open File - Security Warning" dialog
+("The publisher could not be verified..."). This is normal for any script
+downloaded from the internet, not specific to this tool, and there's nothing
+malicious to find — it's just unsigned. Fastest way through: uncheck **Always
+ask before opening this file**, then click **Run**; it won't ask again for
+that file. (To avoid the dialog entirely: right-click the downloaded `.zip`
+*before* extracting it → Properties → check **Unblock** → OK → then extract —
+that clears the "downloaded from the internet" flag from every file inside.)
+
 Manual install, if you prefer:
 
 ```
