@@ -750,7 +750,7 @@ def _speed_disagreement_extras(cat: CategoryResult) -> str:
 
 
 _INITIATOR_LABELS = {
-    "model": "Model-led (no resistance)",
+    "model": "Model-led",
     "driver": "Driver-led",
     "lag": "Neither led (control lag)",
     "unknown": "Unknown (no cmd source)",
