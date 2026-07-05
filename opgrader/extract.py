@@ -96,6 +96,7 @@ _SPECS = {
     "steeringAngleDeg": ("carState", ["steeringAngleDeg"], _FLOAT),
     "steeringRateDeg": ("carState", ["steeringRateDeg"], _FLOAT),
     "steeringPressed": ("carState", ["steeringPressed"], _BOOL),
+    "steeringTorque": ("carState", ["steeringTorque"], _FLOAT),  # driver's raw torque, native CAN units
     "leftBlinker": ("carState", ["leftBlinker"], _BOOL),
     "rightBlinker": ("carState", ["rightBlinker"], _BOOL),
     # enable state: selfdriveState (modern) with controlsState fallback below
@@ -220,6 +221,19 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
 
     acc["planVisV4"] = ([], [])
 
+    # controlsState.lateralControlState is a capnp UNION -- torqueState is
+    # only one of several possible active arms (pidState/angleState/etc.),
+    # so this can't go through the generic _SPECS/_FieldGrabber dotted-path
+    # machinery (which has no notion of ".which()"); reading a struct field
+    # of an inactive union arm would silently return meaningless data
+    # instead of raising, so the active arm must be checked explicitly.
+    # Verified against real Palisade logs (op-replay-clipper's
+    # renderers/big_ui_engine.py): output is the commanded torque fraction,
+    # already normalized -1..1, no per-car calibration needed.
+    _TORQUE_KEYS = ("torqueOutput", "torqueSaturated", "desiredLatAccel", "actualLatAccel")
+    for k in _TORQUE_KEYS:
+        acc[k] = ([], [])
+
     personality_raw: int | None = None
     saw_selfdrive = False
 
@@ -245,6 +259,26 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
                             ts4, vs4 = acc["planVisV4"]
                             ts4.append(t)
                             vs4.append(float(np.interp(4.0, list(vt), list(vx))))
+                    except Exception:
+                        pass
+                if which == "controlsState":
+                    # torqueState is only the active arm on torque-controlled
+                    # cars; angle/PID/curvature-controlled cars (or old logs)
+                    # take a different union arm and simply have no torque
+                    # channel here (missing, not zero/garbage)
+                    try:
+                        lcs = msg.lateralControlState
+                        if lcs.which() == "torqueState":
+                            ts_ = lcs.torqueState
+                            for key, val in (
+                                ("torqueOutput", float(ts_.output)),
+                                ("torqueSaturated", bool(ts_.saturated)),
+                                ("desiredLatAccel", float(ts_.desiredLateralAccel)),
+                                ("actualLatAccel", float(ts_.actualLateralAccel)),
+                            ):
+                                ts_acc, vs_acc = acc[key]
+                                ts_acc.append(t)
+                                vs_acc.append(val)
                     except Exception:
                         pass
                 if which == "selfdriveState":
@@ -331,6 +365,14 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
     for key, (which, _p, dtype) in _SPECS.items():
         drive.channels[key] = to_channel(key, dtype)
     drive.channels["planVisV4"] = to_channel("planVisV4", _FLOAT)
+    for key, dtype in (
+        ("torqueOutput", _FLOAT), ("torqueSaturated", _BOOL),
+        ("desiredLatAccel", _FLOAT), ("actualLatAccel", _FLOAT),
+    ):
+        ch = to_channel(key, dtype)
+        drive.channels[key] = ch
+        if len(ch) == 0:
+            drive.missing.append(key)
 
     # enable-state fallback: prefer selfdriveState, else controlsState
     if not saw_selfdrive:

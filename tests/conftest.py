@@ -47,12 +47,17 @@ def make_drive(
         "planVisA0": 0.0,
         "planVisDA": 0.0,
         "planVisV4": 0.0,
+        "torqueOutput": 0.0,
+        "desiredLatAccel": 0.0,
+        "actualLatAccel": 0.0,
+        "steeringTorque": 0.0,
     }
     bools = {
         "gasPressed": False,
         "brakePressed": False,
         "standstill": False,
         "steeringPressed": False,
+        "torqueSaturated": False,
         "leftBlinker": False,
         "rightBlinker": False,
         "enabled": False,

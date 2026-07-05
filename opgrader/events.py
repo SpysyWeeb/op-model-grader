@@ -86,6 +86,11 @@ class DriveArrays:
     desired_curv: np.ndarray | None  # modelV2.action.desiredCurvature (raw sign)
     vis_accel: np.ndarray | None  # vision plan accel: acceleration.x[0] (fallback action.desiredAcceleration)
     vis_v4: np.ndarray | None  # vision planned speed ~4 s ahead
+    torque_output: np.ndarray | None  # controlsState.lateralControlState.torqueState.output, -1..1
+    torque_saturated: np.ndarray | None  # .saturated -- UNRELIABLE, diagnostic only (see lateral.py)
+    desired_lat_accel: np.ndarray | None  # .desiredLateralAccel, m/s^2
+    actual_lat_accel: np.ndarray | None  # .actualLateralAccel, m/s^2
+    driver_torque: np.ndarray | None  # carState.steeringTorque, driver's raw torque (native CAN units)
 
     @property
     def has_lead_data(self) -> bool:
@@ -185,6 +190,11 @@ def build_arrays(drive: Drive, seg: Segmentation) -> DriveArrays:
         desired_curv=f("desiredCurvature"),
         vis_accel=(f("planVisA0") if drive.ch("planVisA0") is not None else f("planVisDA")),
         vis_v4=f("planVisV4"),
+        torque_output=f("torqueOutput"),
+        torque_saturated=b("torqueSaturated"),
+        desired_lat_accel=f("desiredLatAccel"),
+        actual_lat_accel=f("actualLatAccel"),
+        driver_torque=f("steeringTorque"),
     )
 
 
