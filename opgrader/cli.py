@@ -13,7 +13,7 @@ from .download import DownloadError, download_route
 from .events import build_arrays, detect_events
 from .extract import extract_drive
 from .logreader import find_segments, group_segments, route_name_for_group
-from .pipeline import analyze
+from .pipeline import MismatchError, analyze
 from .report import render_report
 from .segments import segment_drive
 
@@ -66,6 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="skip the confirmation prompt for --clear-profile",
+    )
+    p.add_argument(
+        "--allow-mixed",
+        action="store_true",
+        help="grade routes from different vehicles and/or driving models together anyway "
+        "(by default this is refused; the report carries a warning banner when overridden)",
     )
     p.add_argument("--version", action="version", version=f"opgrader {__version__}")
     return p
@@ -146,7 +152,14 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no usable drives decoded", file=sys.stderr)
         return 1
 
-    analysis = analyze(per_drive, t_follow_targets=t_follow, use_profile=not args.no_profile)
+    try:
+        analysis = analyze(
+            per_drive, t_follow_targets=t_follow, use_profile=not args.no_profile,
+            allow_mixed=args.allow_mixed,
+        )
+    except MismatchError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     grades = analysis.grades
 
     for _d, _s, _a, events in per_drive:
