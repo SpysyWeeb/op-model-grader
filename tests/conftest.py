@@ -63,6 +63,9 @@ def make_drive(
         d.channels[k] = Channel(t.copy(), arr(k, dv, np.float64))
     for k, dv in bools.items():
         d.channels[k] = Channel(t.copy(), arr(k, dv, np.bool_))
+    ints = {"personality": 1}  # standard, unless a test overrides
+    for k, dv in ints.items():
+        d.channels[k] = Channel(t.copy(), arr(k, dv, np.int16))
     d.meta.vm_params = {
         # roughly a midsize SUV; any self-consistent set works for tests
         "mass": 2200.0,

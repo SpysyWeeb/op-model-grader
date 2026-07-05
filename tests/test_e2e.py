@@ -18,6 +18,10 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def demo_analysis():
+    # keep tests offline: model identification would otherwise hit GitHub
+    from opgrader import modelid
+    from unittest.mock import patch
+
     from opgrader.events import build_arrays, detect_events
     from opgrader.extract import extract_drive
     from opgrader.logreader import find_segments, group_segments, route_name_for_group
@@ -33,7 +37,9 @@ def demo_analysis():
         seg = segment_drive(d)
         da = build_arrays(d, seg)
         per.append((d, seg, da, detect_events(d, seg, da)))
-    return analyze(per)
+    stub = {"label": "stubbed (offline test)", "provenance": "unknown", "sha256": None}
+    with patch.object(modelid, "resolve", return_value=stub):
+        return analyze(per)
 
 
 def test_demo_decodes_and_finds_spans(demo_analysis):

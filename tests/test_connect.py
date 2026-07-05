@@ -192,6 +192,13 @@ def test_run_grade_job_demo_route(tmp_path, monkeypatch):
     if not demo.is_dir() or not list(demo.glob("rlog*")):
         pytest.skip("demo rlogs not downloaded")
     monkeypatch.setattr(connect, "REPORTS_DIR", tmp_path)
+    # keep tests offline: stub the model-id lookup analyze() would perform
+    from opgrader import modelid
+
+    monkeypatch.setattr(
+        modelid, "resolve",
+        lambda meta, session=None: {"label": "stub", "provenance": "unknown", "sha256": None},
+    )
     jm = JobManager()
     assert jm.try_start("demo")
     phases = []

@@ -111,7 +111,14 @@ and weights renormalized; overall = ½ longitudinal + ½ lateral):
 
 **Longitudinal**
 - **Smoothness** (0.30) — RMS/P95 jerk, accel reversals/min, % time |a|>2
-- **Following** (0.20) — median time gap, gap hunting, accel reversals in follow
+- **Following** (0.20) — median time gap, gap hunting, accel reversals in
+  follow, and **follow-distance adherence**: the model's held gap (inverted
+  from the long-MPC distance formula over steady-follow samples) vs the
+  ACTIVE personality's target, scored absolutely (100 at ≤5% error, 50 at
+  25%, 0 at ≥50%). Targets are **fork-dependent** — stock defaults are
+  aggressive 1.25 / standard 1.45 / relaxed 1.75 s; set yours with
+  `--t-follow aggressive=1.0,standard=1.45,relaxed=2.0`, the UI's target
+  boxes, or `~/.config/opgrader/config.json`.
 - **Stopping** (0.20) — peak decel, decel timing, stop lurch (max |jerk| in the
   last 2 s before standstill), accel at crawl speed
 - **Launch** (0.17) — time to 5 m/s, peak jerk
@@ -147,6 +154,39 @@ lateral metrics follow `carControl.latActive`. So AOL/MADS time counts as the
 model for steering and as *you* for gas/brake — exactly what you want. Events
 with mixed control over their window are discarded. Old logs without the
 per-axis flags fall back to the single `enabled` flag (noted in the report).
+
+### Mode & personality breakdowns
+
+Experimental/chill mode and the longitudinal personality are tracked **per
+sample** — mid-drive hot-swaps are expected and handled. Every longitudinal
+event is tagged with the mode/personality active during its window (≥90%
+agreement, else "mixed"); mixed events stay in the overall grades but are
+excluded from the buckets. The report adds a "Longitudinal breakdowns"
+section grading each mode and personality bucket against the same human
+baseline (per-bucket n≥3 gating), plus time-in-mode/personality chips in the
+header. Old logs that predate the personality field are reported as
+personality-unknown rather than guessed.
+
+### Driving-model identification
+
+The report header names the driving model when it can, in layers:
+
+1. **Fork model selectors** — sunnypilot's model manager and FrogPilot
+   persist the selected model in the device params, which land in the log's
+   initData; only those whitelisted selector keys are ever read (the params
+   dump contains secrets and is never embedded in reports).
+2. **Build commit** — stock/non-switcher forks commit models as git-lfs
+   pointers, so the pointer's sha256 at `initData.gitCommit` is fetched from
+   GitHub (cached in `~/.cache/opgrader/modelid.json`, works for
+   force-push-orphaned commits) and reverse-looked-up in the bundled
+   `opgrader/model_hashes.json`.
+3. Otherwise the sha256/commit is shown so a human can identify it — and on
+   switcher forks without a persisted selection, logs simply can't tell.
+
+Everything is best-effort: offline grading is never blocked. Dirty builds
+get a "hash may not match device" caveat. To teach it new models, add
+`{"<sha256>": {"name": ..., "source": ...}}` entries to `model_hashes.json`
+(only with verified provenance).
 
 ## Limitations
 

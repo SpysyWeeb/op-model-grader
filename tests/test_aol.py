@@ -76,7 +76,7 @@ def test_aol_samples_land_in_correct_pools():
     seg = segment_drive(d)
     da = build_arrays(d, seg)
     events = detect_events(d, seg, da)
-    samples = collect_samples([(d, seg, da, events)])
+    samples, _buckets = collect_samples([(d, seg, da, events)])
 
     # longitudinal smoothness: human pool only
     assert len(samples["rms_jerk"]["driver"]) >= 1
