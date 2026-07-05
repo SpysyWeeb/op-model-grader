@@ -279,7 +279,11 @@ class JobManager:
             self._state.update(
                 active=False,
                 phase="error",
-                error={"message": str(exc) or type(exc).__name__, "traceback": tail},
+                # "type" lets callers (gui.py) recognize a specific failure
+                # (e.g. pipeline.MismatchError) without keeping the live
+                # exception object around across the thread boundary.
+                error={"message": str(exc) or type(exc).__name__, "traceback": tail,
+                       "type": type(exc).__name__},
                 progress=None,
             )
 
@@ -294,11 +298,16 @@ def _slug(parts: list[str]) -> str:
 
 
 def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str | None,
-                  t_follow_targets: dict | None = None, use_profile: bool = True):
+                  t_follow_targets: dict | None = None, use_profile: bool = True,
+                  allow_mixed: bool = False):
     """Download missing rlogs, run the pipeline, write the report.
 
     Meant to run in a background thread; never raises (failures land in the
-    job state). On success job.report is the absolute report path.
+    job state). On success job.report is the absolute report path. If the
+    selected routes are from different vehicles/driving models and
+    allow_mixed is False, analyze() raises pipeline.MismatchError, which
+    lands here as a normal job failure (job["error"]["message"] carries its
+    text) -- gui.py offers a retry-with-allow_mixed action on that failure.
     """
     from .events import build_arrays, detect_events
     from .extract import extract_drive
@@ -373,7 +382,10 @@ def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str
             from .config import get_t_follow
 
             t_follow_targets = get_t_follow()
-        analysis = analyze(per_drive, t_follow_targets=t_follow_targets, use_profile=use_profile)
+        analysis = analyze(
+            per_drive, t_follow_targets=t_follow_targets, use_profile=use_profile,
+            allow_mixed=allow_mixed,
+        )
 
         job.update(phase="rendering", detail="writing report")
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)

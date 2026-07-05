@@ -44,6 +44,7 @@ class App:
         self.badges: dict[str, dict] = {}     # fullname -> files_badge dict
         self.pending_uploads: set[str] = set()
         self.local_paths: list[str] = []
+        self._last_grade_args: tuple[list[str], list[str], dict] | None = None
 
         self._q: queue.Queue = queue.Queue()
         self._build_widgets()
@@ -131,11 +132,12 @@ class App:
         self.routes_msg = ttk.Label(top, text="", foreground="gray")
         self.routes_msg.pack(side="left", padx=10)
 
-        cols = ("started", "duration", "segments", "branch", "rlogs")
+        cols = ("started", "duration", "segments", "branch", "vehicle", "rlogs")
         self.tree = ttk.Treeview(routes_frame, columns=cols, show="headings", selectmode="extended")
         headings = {
             "started": ("Started", 150), "duration": ("Duration", 80),
-            "segments": ("Segments", 80), "branch": ("Branch", 130), "rlogs": ("rlogs", 190),
+            "segments": ("Segments", 80), "branch": ("Branch", 130),
+            "vehicle": ("Vehicle", 130), "rlogs": ("rlogs", 190),
         }
         for c in cols:
             text, width = headings[c]
@@ -396,7 +398,8 @@ class App:
             dur = f"{r['duration_s'] / 60:.0f} min" if r["duration_s"] else "–"
             self.tree.insert(
                 "", "end", iid=r["fullname"], tags=(tag,),
-                values=(started, dur, r["n_segments"] or "–", r["git_branch"], badge_text),
+                values=(started, dur, r["n_segments"] or "–", r["git_branch"],
+                        r["platform"] or "–", badge_text),
             )
         for iid in selected:
             if self.tree.exists(iid):
@@ -546,15 +549,42 @@ class App:
                 return
         set_t_follow(targets)  # persist for next time (and for the CLI)
 
+        # Cheap pre-check from already-known route metadata (no download or
+        # decode) -- a fast UX nicety, NOT a substitute for the pipeline's
+        # authoritative post-decode gate below, which still runs regardless
+        # and also catches model-only mismatches this can't see.
+        allow_mixed = False
+        if connect and len(routes) > 1:
+            platforms = sorted({
+                r["platform"] for r in self.routes
+                if r["fullname"] in routes and r["platform"]
+            })
+            if len(platforms) > 1:
+                if not messagebox.askyesno(
+                    "different vehicles",
+                    f"These routes are from different vehicles ({', '.join(platforms)}) "
+                    "-- grade them together anyway?",
+                ):
+                    return
+                allow_mixed = True
+
+        self._launch_grade_job(routes, local_paths, targets, allow_mixed)
+
+    def _launch_grade_job(self, routes: list[str], local_paths: list[str],
+                          targets: dict, allow_mixed: bool):
         if not self.jobs.try_start(", ".join(routes + local_paths)):
             messagebox.showinfo("busy", "A grading job is already running — wait for it to finish.")
             return
+        # remembered so the job-failure UI can offer a same-selection retry
+        # with the override if the pipeline's post-decode gate rejects it
+        self._last_grade_args = (routes, local_paths, targets)
         self.grade_btn.config(state="disabled")
         self.progress.config(mode="indeterminate")
         self.progress.start(80)
         threading.Thread(
             target=C.run_grade_job,
-            args=(self.jobs, routes, local_paths, self.jwt, targets, self.profile_var.get()),
+            args=(self.jobs, routes, local_paths, self.jwt, targets,
+                  self.profile_var.get(), allow_mixed),
             daemon=True,
         ).start()
         self.root.after(POLL_JOB_MS, self._poll_job)
@@ -581,6 +611,15 @@ class App:
         elif j["phase"] == "error" and j.get("error"):
             err = j["error"]
             self.status.config(text=f"error: {err['message']}")
+            if err.get("type") == "MismatchError" and self._last_grade_args:
+                routes, local_paths, targets = self._last_grade_args
+                if messagebox.askyesno(
+                    "grading failed",
+                    err["message"] + "\n\nRetry with --allow-mixed (grade them together anyway)? "
+                    "The report will carry a warning banner.",
+                ):
+                    self._launch_grade_job(routes, local_paths, targets, allow_mixed=True)
+                return
             messagebox.showerror(
                 "grading failed",
                 err["message"] + "\n\n" + "\n".join(err.get("traceback") or []),

@@ -64,4 +64,88 @@ def test_app_builds_and_polls(root, monkeypatch):
                             "n_logs": 5, "n_segments": 5}
     app._render_routes()
     assert app.tree.exists("d|r--1")
-    assert app.tree.item("d|r--1")["values"][4] == "rlogs ready 5/5"
+    # columns: started, duration, segments, branch, vehicle, rlogs
+    assert app.tree.item("d|r--1")["values"][4] == "–"  # no platform given -> placeholder
+    assert app.tree.item("d|r--1")["values"][5] == "rlogs ready 5/5"
+
+
+def _route_dict(fullname, platform):
+    return {
+        "fullname": fullname, "name": fullname.split("|", 1)[-1],
+        "start_utc_millis": 1_700_000_000_000, "duration_s": 120,
+        "n_segments": 2, "git_branch": "master", "git_remote": "", "platform": platform,
+    }
+
+
+def test_grade_prompts_and_can_be_declined_on_different_vehicle_platforms(root, monkeypatch, tmp_path):
+    """The cheap pre-check (platform strings, no decode) must catch an
+    obviously-different-vehicle selection before a job is even started, and
+    declining it must leave no job running."""
+    from tkinter import messagebox
+
+    from opgrader import config
+    from opgrader import connect as C
+    from opgrader import gui
+
+    monkeypatch.setattr(C, "read_jwt", lambda: None)
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
+    app = gui.App(root)
+
+    app.routes = [
+        _route_dict("d|rA", "HYUNDAI_PALISADE"),
+        _route_dict("d|rB", "HONDA_CIVIC"),
+    ]
+    app.badges["d|rA"] = {"label": "rlogs ready 2/2", "kind": "ready", "n_logs": 2, "n_segments": 2}
+    app.badges["d|rB"] = {"label": "rlogs ready 2/2", "kind": "ready", "n_logs": 2, "n_segments": 2}
+    app._render_routes()
+    app.tree.selection_set("d|rA", "d|rB")
+
+    asked = {}
+
+    def fake_askyesno(title, msg):
+        asked["title"], asked["msg"] = title, msg
+        return False  # decline
+
+    monkeypatch.setattr(messagebox, "askyesno", fake_askyesno)
+    app._grade()
+
+    assert "vehicles" in asked["title"]
+    assert "HYUNDAI_PALISADE" in asked["msg"] and "HONDA_CIVIC" in asked["msg"]
+    assert not app.jobs.snapshot()["active"]  # declined -> no job launched
+
+
+def test_grade_proceeds_without_prompt_when_platforms_match(root, monkeypatch, tmp_path):
+    """Same-vehicle multi-select must not be interrupted by the pre-check."""
+    from tkinter import messagebox
+
+    from opgrader import config
+    from opgrader import connect as C
+    from opgrader import gui
+
+    monkeypatch.setattr(C, "read_jwt", lambda: None)
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
+    app = gui.App(root)
+
+    app.routes = [
+        _route_dict("d|rA", "HYUNDAI_PALISADE"),
+        _route_dict("d|rB", "HYUNDAI_PALISADE"),
+    ]
+    app.badges["d|rA"] = {"label": "rlogs ready 2/2", "kind": "ready", "n_logs": 2, "n_segments": 2}
+    app.badges["d|rB"] = {"label": "rlogs ready 2/2", "kind": "ready", "n_logs": 2, "n_segments": 2}
+    app._render_routes()
+    app.tree.selection_set("d|rA", "d|rB")
+
+    def fail_if_asked(*a, **kw):
+        raise AssertionError("askyesno should not be called when platforms match")
+
+    monkeypatch.setattr(messagebox, "askyesno", fail_if_asked)
+    app._grade()  # must not raise, must reach job launch (no JWT -> job fails async, that's fine)
+
+    import time
+
+    deadline = time.time() + 5
+    while time.time() < deadline and app.jobs.snapshot()["active"]:
+        root.update()
+        time.sleep(0.05)
+    assert app._last_grade_args is not None
+    assert set(app._last_grade_args[0]) == {"d|rA", "d|rB"}
