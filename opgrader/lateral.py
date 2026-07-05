@@ -1,0 +1,476 @@
+"""Lateral analysis: ping-pong oscillation, turn episodes, turn-in timing.
+
+Definitions mirror the owner's on-device analyzer so numbers are comparable:
+- turn onset when |steeringAngleDeg| (or |commanded angle|) crosses 20 deg
+- unwind point = first time after a signal's peak it falls to <= 50% of peak
+- sharp turn = peak >= 90 deg with speed at onset < 15 mph (6.7 m/s)
+- positive steeringAngleDeg = LEFT (ISO sign convention)
+
+All detection happens inside engaged/manual spans (which never cross
+inter-segment time gaps > 1 s), except blinker turn-intent windows, which are
+detected on the whole timeline (a disengagement inside the window is part of
+the signal) and discarded if they cross a gap.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from .events import DriveArrays, Event, _contiguous_runs, _idx_after
+from .metrics import rms, smooth
+from .segments import Segmentation
+
+MPH = 0.44704
+TURN_ONSET_DEG = 20.0
+UNWIND_FRACTION = 0.5
+TURN_PEAK_MIN_DEG = 90.0  # sharp-turn peak threshold
+SHARP_MAX_ONSET_V = 15 * MPH  # 6.7 m/s
+OVERSHOOT_WINDOW_S = 4.0
+WOBBLE_MIN_DEG = 10.0
+
+PP_BINS_MPH: list[tuple[float, float]] = [
+    (0, 5), (5, 10), (10, 20), (20, 35), (35, 55), (55, 200),
+]
+PP_HP_WINDOW_S = 2.0  # high-pass = signal minus centered 2 s moving average
+PP_SWING_DEG = 3.0  # min swing between extrema to count a reversal
+PP_MIN_BIN_S = 30.0  # per side, to score a speed bin
+PP_SUB_BIN_MIN_S = 60.0  # engaged seconds needed for a 1 mph sub-bin row
+PP_WORST_WINDOW_S = 10.0
+
+INTENT_MAX_V = 20 * MPH  # 8.9 m/s
+INTENT_WINDOW_S = 20.0
+INTENT_OFF_PAD_S = 5.0
+INTENT_TURN_DEG = 45.0  # |net heading| >= this => intersection turn
+INTENT_LANE_DEG = 20.0  # < this => lane change
+
+
+# ------------------------------------------------------------------ helpers
+
+
+def highpass_angle(t: np.ndarray, angle: np.ndarray) -> np.ndarray:
+    """Angle minus its centered 2 s moving average (keeps wobble, drops maneuver)."""
+    return angle - smooth(t, angle, PP_HP_WINDOW_S)
+
+
+def swing_reversal_count(x: np.ndarray, thresh: float = PP_SWING_DEG) -> int:
+    """Direction reversals where the swing between successive extrema > thresh.
+
+    Zig-zag walk: commit to a direction once the signal moves > thresh away
+    from the running extreme; each committed direction change after the first
+    counts as one reversal.
+    """
+    if len(x) < 2:
+        return 0
+    count = 0
+    direction = 0  # +1 rising, -1 falling, 0 uncommitted
+    ref = x[0]
+    for v in x[1:]:
+        if direction >= 0 and v > ref:
+            ref = v
+        elif direction <= 0 and v < ref:
+            ref = v
+        if ref - v > thresh and direction != -1:
+            if direction == 1:
+                count += 1
+            direction = -1
+            ref = v
+        elif v - ref > thresh and direction != 1:
+            if direction == -1:
+                count += 1
+            direction = 1
+            ref = v
+    return count
+
+
+def _first_idx(mask: np.ndarray, start: int = 0) -> int | None:
+    idx = np.flatnonzero(mask[start:])
+    return int(start + idx[0]) if len(idx) else None
+
+
+# ------------------------------------------------------------- turn episodes
+
+
+@dataclass
+class TurnEpisode:
+    engaged: bool
+    drive: str
+    side: str  # "left" | "right"
+    sharp: bool  # peak >= 90 deg and onset speed < 6.7 m/s
+    band: str  # "20-90" | "90-150" | "150+"
+    i0: int
+    i1: int
+    t_onset: float
+    v_onset: float
+    peak_act: float  # signed deg
+    peak_cmd: float | None
+    t_peak_act: float
+    contaminated: bool  # steeringPressed/override before the actual peak
+    rescued: bool = False  # driver grabbed wheel / disengaged during unwind
+    unwind_rate: float | None = None  # deg/s, peak to |act|<=20
+    overshoot_pct: float | None = None
+    overshoot_deg: float | None = None
+    wobbles: int | None = None
+    cmd_unwind_lead: float | None = None  # cmd 50% crossing minus act 50% crossing
+
+
+def _band(peak_abs: float) -> str:
+    if peak_abs >= 150:
+        return "150+"
+    if peak_abs >= TURN_PEAK_MIN_DEG:
+        return "90-150"
+    return "20-90"
+
+
+def detect_turn_episodes(
+    drive_name: str, seg: Segmentation, da: DriveArrays
+) -> list[TurnEpisode]:
+    if da.steering_angle is None:
+        return []
+    episodes: list[TurnEpisode] = []
+    for span in seg.lat_spans:
+        sl = slice(span.i0, span.i1)
+        t = da.t[sl]
+        act = da.steering_angle[sl]
+        engaged = span.kind == "engaged"
+        cmd = da.cmd_angle[sl] if (engaged and da.cmd_angle is not None) else None
+        combined = np.abs(act) if cmd is None else np.maximum(np.abs(act), np.abs(cmd))
+        pressed = (
+            da.steering_pressed[sl] if da.steering_pressed is not None else np.zeros(len(t), bool)
+        )
+        lat_flag = da.lat_model[sl]
+        override = da.lat_override[sl]
+
+        for a, b in _contiguous_runs(combined >= TURN_ONSET_DEG):
+            if b - a < 3:
+                continue
+            ip_act = a + int(np.argmax(np.abs(act[a:b])))
+            peak_act = float(act[ip_act])
+            if abs(peak_act) < TURN_ONSET_DEG:
+                continue  # command-only excursion; the wheel never turned
+            side = "left" if peak_act > 0 else "right"
+            v_onset = float(da.v[span.i0 + a])
+            sharp = abs(peak_act) >= TURN_PEAK_MIN_DEG and v_onset < SHARP_MAX_ONSET_V
+
+            ep = TurnEpisode(
+                engaged=engaged,
+                drive=drive_name,
+                side=side,
+                sharp=sharp,
+                band=_band(abs(peak_act)),
+                i0=span.i0 + a,
+                i1=span.i0 + b,
+                t_onset=float(t[a]),
+                v_onset=v_onset,
+                peak_act=peak_act,
+                peak_cmd=None,
+                t_peak_act=float(t[ip_act]),
+                contaminated=bool(engaged and (pressed[a:ip_act + 1].any() or override[a:ip_act + 1].any())),
+            )
+
+            # search region for unwind/overshoot: to end of span, capped 15 s past run
+            end = min(len(t), _idx_after(t, t[min(b, len(t) - 1)] + 15.0))
+
+            # unwind point (50% of peak) for the actual angle
+            sgn = np.sign(peak_act)
+            below_half = np.abs(act) <= UNWIND_FRACTION * abs(peak_act)
+            iu_act = _first_idx(below_half[:end], ip_act + 1)
+
+            # unwind rate: peak to |act| <= 20
+            i20 = _first_idx((np.abs(act) <= TURN_ONSET_DEG)[:end], ip_act + 1)
+            if i20 is not None and t[i20] > t[ip_act]:
+                ep.unwind_rate = abs(peak_act) / float(t[i20] - t[ip_act])
+
+            # driver rescue during unwind phase (peak -> |act| < 20)
+            if engaged:
+                ru_end = i20 if i20 is not None else end
+                ph = slice(ip_act, ru_end)
+                ep.rescued = bool(pressed[ph].any() or (~lat_flag[ph]).any())
+
+            # commanded-signal peak & unwind lead
+            if cmd is not None:
+                ip_cmd = a + int(np.argmax(np.abs(cmd[a:b])))
+                ep.peak_cmd = float(cmd[ip_cmd])
+                if abs(ep.peak_cmd) >= TURN_ONSET_DEG and iu_act is not None:
+                    below_half_cmd = np.abs(cmd) <= UNWIND_FRACTION * abs(ep.peak_cmd)
+                    iu_cmd = _first_idx(below_half_cmd[:end], ip_cmd + 1)
+                    if iu_cmd is not None:
+                        ep.cmd_unwind_lead = float(t[iu_cmd] - t[iu_act])
+
+            # S-curve overshoot after the actual angle unwinds through zero
+            izero = _first_idx((sgn * act <= 0)[:end], ip_act + 1)
+            if izero is not None:
+                iw_end = min(end, _idx_after(t, t[izero] + OVERSHOOT_WINDOW_S))
+                w = act[izero:iw_end]
+                if len(w):
+                    opp = -sgn * w  # positive = opposite-sign excursion
+                    ep.overshoot_deg = float(max(0.0, np.max(opp)))
+                    ep.overshoot_pct = 100.0 * ep.overshoot_deg / abs(peak_act)
+                    # recovery wobbles: zero re-crossings whose following lobe > 10 deg
+                    wob = 0
+                    s = np.sign(w)
+                    s[s == 0] = 1
+                    changes = np.flatnonzero(np.diff(s) != 0)
+                    prev = 0
+                    bounds = list(changes + 1) + [len(w)]
+                    for lb2 in bounds:
+                        lobe = w[prev:lb2]
+                        if prev > 0 and len(lobe) and np.max(np.abs(lobe)) > WOBBLE_MIN_DEG:
+                            wob += 1
+                        prev = lb2
+                    ep.wobbles = wob
+
+            episodes.append(ep)
+    return episodes
+
+
+# ---------------------------------------------------------------- ping-pong
+
+
+@dataclass
+class PingPongBin:
+    lo_mph: float
+    hi_mph: float
+    engaged_s: float = 0.0
+    manual_s: float = 0.0
+    engaged_rms: float | None = None
+    manual_rms: float | None = None
+    engaged_rev: float | None = None  # reversals/min
+    manual_rev: float | None = None
+    score: float | None = None
+
+
+@dataclass
+class PingPongResult:
+    bins: list[PingPongBin]
+    sub_bins: list[PingPongBin]  # 1 mph resolution inside 0-10 mph
+    score: float | None  # time-weighted category score
+    worst_bin: PingPongBin | None
+    worst_windows: list[Event] = field(default_factory=list)
+
+
+def _pp_accumulate(t, resid, v, base_mask, lo, hi, acc):
+    """Accumulate sum-of-squares, duration and reversals for one speed bin."""
+    m = base_mask & (v >= lo * MPH) & (v < hi * MPH)
+    if not m.any():
+        return
+    x = resid[m]
+    acc["ss"] += float(np.sum(np.square(x)))
+    acc["n"] += int(len(x))
+    for a, b in _contiguous_runs(m):
+        if b - a < 5:
+            continue
+        acc["dur"] += float(t[b - 1] - t[a])
+        acc["rev"] += swing_reversal_count(resid[a:b])
+
+
+def analyze_pingpong(
+    per_drive: list[tuple[str, Segmentation, DriveArrays]], score_fn
+) -> PingPongResult | None:
+    """score_fn(model_value, driver_value) -> 0..100 (lower-better ratio score)."""
+    have_angle = any(da.steering_angle is not None for _n, _s, da in per_drive)
+    if not have_angle:
+        return None
+
+    def new_acc():
+        return {"ss": 0.0, "n": 0, "dur": 0.0, "rev": 0}
+
+    bins_acc = {
+        (side, i): new_acc() for side in ("engaged", "manual") for i in range(len(PP_BINS_MPH))
+    }
+    sub_edges = [(m, m + 1) for m in range(10)]
+    sub_acc = {
+        (side, i): new_acc() for side in ("engaged", "manual") for i in range(len(sub_edges))
+    }
+    windows: list[tuple[float, Event]] = []
+
+    for name, seg, da in per_drive:
+        if da.steering_angle is None:
+            continue
+        for span in seg.lat_spans:
+            sl = slice(span.i0, span.i1)
+            t = da.t[sl]
+            v = da.v[sl]
+            angle = da.steering_angle[sl]
+            resid = highpass_angle(t, angle)
+            base = np.ones(len(t), bool)
+            if da.standstill is not None:
+                base &= ~da.standstill[sl]
+            else:
+                base &= v > 0.1
+            if span.kind == "engaged":
+                if da.steering_pressed is not None:
+                    base &= ~da.steering_pressed[sl]
+            side = "engaged" if span.kind == "engaged" else "manual"
+
+            for i, (lo, hi) in enumerate(PP_BINS_MPH):
+                _pp_accumulate(t, resid, v, base, lo, hi, bins_acc[(side, i)])
+            for i, (lo, hi) in enumerate(sub_edges):
+                _pp_accumulate(t, resid, v, base, lo, hi, sub_acc[(side, i)])
+
+            # candidate worst 10 s windows (engaged only)
+            if side == "engaged":
+                for a, b in _contiguous_runs(base):
+                    step = max(1, int(round(PP_WORST_WINDOW_S / max(float(np.median(np.diff(t))) if len(t) > 1 else 0.01, 1e-3))))
+                    for w0 in range(a, b - step, step):
+                        w1 = w0 + step
+                        wr = rms(resid[w0:w1])
+                        if np.isfinite(wr):
+                            windows.append(
+                                (wr, Event(
+                                    kind="pingpong", engaged=True, drive=name,
+                                    t0=float(t[w0]), t1=float(t[w1 - 1]),
+                                    i0=span.i0 + w0, i1=span.i0 + w1,
+                                    has_override=False,
+                                    values={"osc_rms": float(wr)},
+                                ))
+                            )
+
+    def finish(acc):
+        rms_v = float(np.sqrt(acc["ss"] / acc["n"])) if acc["n"] else None
+        rev = 60.0 * acc["rev"] / acc["dur"] if acc["dur"] > 0 else None
+        return rms_v, rev, acc["dur"]
+
+    def build_bins(edges, accs, min_s):
+        out = []
+        for i, (lo, hi) in enumerate(edges):
+            b = PingPongBin(lo, hi)
+            b.engaged_rms, b.engaged_rev, b.engaged_s = finish(accs[("engaged", i)])
+            b.manual_rms, b.manual_rev, b.manual_s = finish(accs[("manual", i)])
+            if (
+                b.engaged_s >= min_s
+                and b.manual_s >= min_s
+                and b.engaged_rms is not None
+                and b.manual_rms is not None
+            ):
+                s_rms = score_fn(b.engaged_rms, b.manual_rms)
+                s_rev = (
+                    score_fn(b.engaged_rev, b.manual_rev)
+                    if b.engaged_rev is not None and b.manual_rev is not None
+                    else None
+                )
+                b.score = float(np.mean([s for s in (s_rms, s_rev) if s is not None]))
+            out.append(b)
+        return out
+
+    bins = build_bins(PP_BINS_MPH, bins_acc, PP_MIN_BIN_S)
+    sub_bins = [
+        b for b in build_bins(sub_edges, sub_acc, PP_SUB_BIN_MIN_S)
+        if b.engaged_s >= PP_SUB_BIN_MIN_S
+    ]
+
+    scored = [b for b in bins if b.score is not None]
+    if scored:
+        w = np.array([b.engaged_s for b in scored])
+        s = np.array([b.score for b in scored])
+        score = float(np.sum(w * s) / np.sum(w))
+        worst = min(scored, key=lambda b: b.score)
+    else:
+        score, worst = None, None
+
+    windows.sort(key=lambda p: -p[0])
+    return PingPongResult(bins, sub_bins, score, worst, [e for _r, e in windows[:3]])
+
+
+# -------------------------------------------------------------- turn intent
+
+
+@dataclass
+class IntentWindow:
+    engaged: bool
+    drive: str
+    side: str
+    t_on: float
+    t_end: float
+    i0: int
+    i1: int
+    outcome: str  # "turn" | "lane_change" | "ambiguous"
+    heading_deg: float | None
+    delay: float | None = None  # blinker-on -> |act| crosses 20 (executed turns)
+    missed: bool = False  # engaged turn the driver had to take over
+    cmd_onset_lead: float | None = None
+
+
+def detect_intent_windows(
+    drive_name: str, seg: Segmentation, da: DriveArrays, vm=None
+) -> list[IntentWindow]:
+    if da.steering_angle is None or (da.left_blinker is None and da.right_blinker is None):
+        return []
+    t = da.t
+    v = da.v
+    act = da.steering_angle
+    lb = da.left_blinker if da.left_blinker is not None else np.zeros(len(t), bool)
+    rb = da.right_blinker if da.right_blinker is not None else np.zeros(len(t), bool)
+    pressed = da.steering_pressed if da.steering_pressed is not None else np.zeros(len(t), bool)
+
+    # heading rate: measured yaw if available, else vehicle-model from the wheel
+    if da.yaw_rate is not None:
+        hr = da.yaw_rate
+    elif vm is not None:
+        with np.errstate(all="ignore"):
+            hr = vm.calc_curvature(np.radians(act) / 1.0, np.maximum(v, 0.1)) * v
+        hr = np.where(np.isfinite(hr), hr, 0.0)
+    else:
+        hr = None
+
+    out: list[IntentWindow] = []
+    blink = lb | rb
+    for a, b in _contiguous_runs(blink):
+        low = np.flatnonzero(v[a:b] < INTENT_MAX_V)
+        if len(low) == 0:
+            continue
+        i_on = a + int(low[0])
+        side = "left" if lb[i_on] else "right"
+        t_on = float(t[i_on])
+        t_end = max(t_on + INTENT_WINDOW_S, float(t[b - 1]) + INTENT_OFF_PAD_S)
+        i_end = min(len(t), _idx_after(t, t_end))
+        if i_end - i_on < 10:
+            continue
+        if np.any(np.diff(t[i_on:i_end]) > 1.0):
+            continue  # crosses an inter-segment gap
+        engaged = bool(da.lat_model[i_on])
+
+        if hr is None:
+            outcome, heading = "ambiguous", None
+        else:
+            _trapz = getattr(np, "trapezoid", None) or np.trapz
+            heading = float(np.degrees(_trapz(hr[i_on:i_end], t[i_on:i_end])))
+            h = heading if side == "left" else -heading
+            if h >= INTENT_TURN_DEG:
+                outcome = "turn"
+            elif abs(heading) < INTENT_LANE_DEG:
+                outcome = "lane_change"
+            else:
+                outcome = "ambiguous"
+
+        w = IntentWindow(
+            engaged=engaged, drive=drive_name, side=side,
+            t_on=t_on, t_end=float(t[i_end - 1]), i0=i_on, i1=i_end,
+            outcome=outcome, heading_deg=heading,
+        )
+
+        if outcome == "turn":
+            sgn = 1.0 if side == "left" else -1.0
+            crossed = sgn * act[i_on:i_end] >= TURN_ONSET_DEG
+            ic = _first_idx(crossed)
+            press_slice = pressed[i_on:i_end]
+            diseng = engaged and (~da.lat_model[i_on:i_end]).any()
+            if not engaged:
+                if ic is not None:
+                    w.delay = float(t[i_on + ic] - t_on)
+            else:
+                pressed_before = (
+                    press_slice[:ic].any() if ic is not None else press_slice.any()
+                )
+                if ic is not None and not pressed_before and not diseng:
+                    w.delay = float(t[i_on + ic] - t_on)
+                    if da.cmd_angle is not None:
+                        cmdw = sgn * da.cmd_angle[i_on:i_end] >= TURN_ONSET_DEG
+                        icc = _first_idx(cmdw)
+                        if icc is not None:
+                            w.cmd_onset_lead = float(t[i_on + icc] - t[i_on + ic])
+                else:
+                    w.missed = True
+        out.append(w)
+    return out

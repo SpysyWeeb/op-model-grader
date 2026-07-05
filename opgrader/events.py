@@ -59,9 +59,19 @@ class DriveArrays:
     v: np.ndarray
     a: np.ndarray
     a_smooth: np.ndarray
-    override: np.ndarray  # bool
+    long_override: np.ndarray  # gas/brake pressed while model controls long
+    lat_override: np.ndarray  # steeringPressed while model controls lat
+    enabled: np.ndarray  # bool (single flag, reference only)
+    lat_model: np.ndarray  # bool: model steering (AOL/MADS aware)
+    long_model: np.ndarray  # bool: model gas/brake
+    standstill: np.ndarray | None
+    steering_angle: np.ndarray | None  # deg, positive = LEFT (ISO)
+    cmd_angle: np.ndarray | None  # commanded steering angle via VehicleModel, deg
     steering_rate: np.ndarray | None
     steering_pressed: np.ndarray | None
+    left_blinker: np.ndarray | None
+    right_blinker: np.ndarray | None
+    yaw_rate: np.ndarray | None  # rad/s
     lat_accel: np.ndarray | None  # vEgo * yawRate, None if no yaw source
     lead_status: np.ndarray | None  # bool
     d_rel: np.ndarray | None
@@ -109,14 +119,42 @@ def build_arrays(drive: Drive, seg: Segmentation) -> DriveArrays:
     yaw = f("yawRate")
     lat_accel = v * yaw if yaw is not None else None
 
+    # commanded steering angle: actuators.steeringAngleDeg if populated (angle
+    # cars), else VehicleModel conversion of the NEGATED actuators.curvature
+    # (torque cars) -- matching openpilot's controlsd convention.
+    cmd_angle = None
+    cmd_direct = f("ccSteeringAngleDeg")
+    if cmd_direct is not None and np.nanmax(np.abs(cmd_direct)) > 1e-3:
+        cmd_angle = cmd_direct
+    else:
+        from .vehicle_model import vehicle_model_from_params
+
+        vm = vehicle_model_from_params(drive.meta.vm_params)
+        curv = f("ccCurvature")
+        if vm is not None and curv is not None:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                cf = vm.curvature_factor(v)
+                cmd_angle = np.degrees(-curv * vm.sR / cf)
+            cmd_angle = np.where(np.isfinite(cmd_angle), cmd_angle, 0.0)
+
     return DriveArrays(
         t=t,
         v=v,
         a=a,
         a_smooth=smooth(t, a),
-        override=seg.override,
+        long_override=seg.long_override,
+        lat_override=seg.lat_override,
+        enabled=seg.enabled,
+        lat_model=seg.lat_model,
+        long_model=seg.long_model,
+        standstill=b("standstill"),
+        steering_angle=f("steeringAngleDeg"),
+        cmd_angle=cmd_angle,
         steering_rate=steering_rate,
         steering_pressed=b("steeringPressed"),
+        left_blinker=b("leftBlinker"),
+        right_blinker=b("rightBlinker"),
+        yaw_rate=yaw,
         lat_accel=lat_accel,
         lead_status=b("leadStatus"),
         d_rel=f("leadDRel"),
@@ -145,18 +183,38 @@ def _runs_min_dur(t, mask, min_dur):
     ]
 
 
-def _mk_event(kind: str, span: Span, da: DriveArrays, drive: str, i0: int, i1: int, **values) -> Event:
+MIXED_CONTROL_TOLERANCE = 0.10  # <10% of samples may disagree with the tag
+
+
+def axis_tag(flag: np.ndarray, i0: int, i1: int) -> bool | None:
+    """Engaged/manual tag for a window, or None if control is mixed."""
+    frac = float(np.mean(flag[i0:i1])) if i1 > i0 else 0.0
+    if frac >= 1.0 - MIXED_CONTROL_TOLERANCE:
+        return True
+    if frac <= MIXED_CONTROL_TOLERANCE:
+        return False
+    return None  # mixed control: discard rather than mis-attribute
+
+
+def _mk_event(
+    kind: str, span: Span, da: DriveArrays, drive: str, i0: int, i1: int, **values
+) -> Event | None:
     i0 = max(i0, 0)
     i1 = min(i1, len(da.t))
+    # longitudinal events are attributed by who controlled gas/brake over the
+    # actual event window (AOL-aware), not by the enclosing span
+    engaged = axis_tag(da.long_model, i0, i1)
+    if engaged is None:
+        return None
     return Event(
         kind=kind,
-        engaged=span.kind == "engaged",
+        engaged=engaged,
         drive=drive,
         t0=float(da.t[i0]),
         t1=float(da.t[i1 - 1]),
         i0=i0,
         i1=i1,
-        has_override=bool(da.override[i0:i1].any()),
+        has_override=bool(da.long_override[i0:i1].any()),
         values=dict(values),
     )
 
@@ -167,7 +225,7 @@ def _idx_after(t: np.ndarray, t_target: float) -> int:
 
 def detect_events(drive: Drive, seg: Segmentation, da: DriveArrays) -> list[Event]:
     events: list[Event] = []
-    for span in seg.spans:
+    for span in seg.long_spans:
         sl = slice(span.i0, span.i1)
         t = da.t[sl]
         v = da.v[sl]
@@ -205,8 +263,10 @@ def _detect_stops(span, da, name, t, v, off):
         # window must not cross a time gap
         if np.any(np.diff(t[k:e]) > 1.0):
             continue
-        out.append(_mk_event("stop", span, da, name, off + k, off + e,
-                             t_standstill=float(t[a])))
+        ev = _mk_event("stop", span, da, name, off + k, off + e,
+                       t_standstill=float(t[a]))
+        if ev is not None:
+            out.append(ev)
     return out
 
 
@@ -228,18 +288,21 @@ def _detect_launches(span, da, name, t, v, off):
             continue
         if np.any(np.diff(t[i_start : i_end + 1]) > 1.0):
             continue
-        out.append(_mk_event("launch", span, da, name, off + i_start, off + i_end + 1,
-                             t_first_motion=float(t[fm])))
+        ev = _mk_event("launch", span, da, name, off + i_start, off + i_end + 1,
+                       t_first_motion=float(t[fm]))
+        if ev is not None:
+            out.append(ev)
     return out
 
 
 def _detect_follows(span, da, name, t, v, status, d_rel, off):
     st = _fill_short_false_gaps(t, status, FOLLOW_DROPOUT_S)
     mask = st & (d_rel < FOLLOW_MAX_DREL) & (v > FOLLOW_MIN_V)
-    return [
+    evs = [
         _mk_event("follow", span, da, name, off + a, off + b)
         for a, b in _runs_min_dur(t, mask, FOLLOW_MIN_DUR_S)
     ]
+    return [e for e in evs if e is not None]
 
 
 def _detect_lead_decels(span, da, name, follows, off):
@@ -261,9 +324,11 @@ def _detect_lead_decels(span, da, name, follows, off):
                 censored = True
             i0 = fw.i0 + _idx_after(t, t[a] - 2.0)
             i1 = fw.i0 + min(len(t), _idx_after(t, t[a] + 6.0) + 1)
-            out.append(_mk_event("lead_decel", span, da, name, i0, i1,
-                                 t_onset=float(t[a]), latency=latency,
-                                 censored=censored))
+            ev = _mk_event("lead_decel", span, da, name, i0, i1,
+                           t_onset=float(t[a]), latency=latency,
+                           censored=censored)
+            if ev is not None:
+                out.append(ev)
     return out
 
 
@@ -292,15 +357,18 @@ def _detect_pullaways(span, da, name, t, v, status, d_rel, off):
             censored = True
         i0 = _idx_after(t, t[ra] - 2.0)
         i1 = _idx_after(t, t[ra] + latency + 2.0)
-        out.append(_mk_event("pullaway", span, da, name, off + i0, off + i1,
-                             t_onset=float(t[ra]), latency=latency,
-                             censored=censored))
+        ev = _mk_event("pullaway", span, da, name, off + i0, off + i1,
+                       t_onset=float(t[ra]), latency=latency,
+                       censored=censored)
+        if ev is not None:
+            out.append(ev)
     return out
 
 
 def _detect_cruise(span, da, name, t, v, status, d_rel, off):
     mask = (~status | (d_rel > CRUISE_NO_LEAD_DREL)) & (v > CRUISE_MIN_V)
-    return [
+    evs = [
         _mk_event("cruise", span, da, name, off + a, off + b)
         for a, b in _runs_min_dur(t, mask, CRUISE_MIN_DUR_S)
     ]
+    return [e for e in evs if e is not None]

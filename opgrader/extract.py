@@ -56,6 +56,7 @@ class Meta:
     wall_time_start: float | None = None  # unix seconds, if initData had it
     routes: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    vm_params: dict[str, float] = field(default_factory=dict)  # for VehicleModel
 
 
 @dataclass
@@ -88,6 +89,8 @@ _SPECS = {
     "steeringAngleDeg": ("carState", ["steeringAngleDeg"], _FLOAT),
     "steeringRateDeg": ("carState", ["steeringRateDeg"], _FLOAT),
     "steeringPressed": ("carState", ["steeringPressed"], _BOOL),
+    "leftBlinker": ("carState", ["leftBlinker"], _BOOL),
+    "rightBlinker": ("carState", ["rightBlinker"], _BOOL),
     # enable state: selfdriveState (modern) with controlsState fallback below
     "enabled": ("selfdriveState", ["enabled"], _BOOL),
     "active": ("selfdriveState", ["active"], _BOOL),
@@ -97,6 +100,8 @@ _SPECS = {
     "longActive": ("carControl", ["longActive"], _BOOL),
     "latActive": ("carControl", ["latActive"], _BOOL),
     "ccAccel": ("carControl", ["actuators.accel"], _FLOAT),
+    "ccCurvature": ("carControl", ["actuators.curvature"], _FLOAT),
+    "ccSteeringAngleDeg": ("carControl", ["actuators.steeringAngleDeg"], _FLOAT),
     # radarState @ ~20 Hz
     "leadStatus": ("radarState", ["leadOne.status"], _BOOL),
     "leadDRel": ("radarState", ["leadOne.dRel"], _FLOAT),
@@ -227,6 +232,19 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
                     drive.meta.openpilot_long = bool(cp.openpilotLongitudinalControl)
                 except Exception:
                     pass
+                for f_name in (
+                    "mass",
+                    "wheelbase",
+                    "centerToFront",
+                    "steerRatio",
+                    "steerRatioRear",
+                    "tireStiffnessFront",
+                    "tireStiffnessRear",
+                ):
+                    try:
+                        drive.meta.vm_params[f_name] = float(getattr(cp, f_name))
+                    except Exception:
+                        pass
             elif which == "initData":
                 init = e.initData
                 for attr, dest in (
@@ -289,6 +307,8 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
         drive.meta.personality = _PERSONALITIES.get(personality_raw, str(personality_raw))
 
     for key in list(_SPECS):
+        if key == "yawRateLLK":
+            continue  # internal fallback source, not a user-facing channel
         c = drive.channels.get(key)
         if (c is None or len(c) == 0) and key not in drive.missing:
             drive.missing.append(key)
