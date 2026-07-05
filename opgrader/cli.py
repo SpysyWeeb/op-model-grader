@@ -160,13 +160,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"plan-vs-you turn-in: median lag {lag} (n={ts['n_lag']}), "
                   f"never planned {ts['never']}/{ts['n']}")
         bs = cf.braking_summary()
-        if bs["n"] or bs["never"]:
-            med = f"{bs['median']:+.2f}s" if bs["median"] is not None else "n/a"
-            print(f"plan-vs-you braking onset: median lag {med} (n={bs['n']}, "
-                  f"plan-never-braked {bs['never']}, no-lead skipped {bs['skipped_no_lead']})")
+        for name, label in (("nolead", "NO LEAD (red lights/signs)"), ("lead", "behind a lead")):
+            b = bs[name]
+            if b["n"] or b["never"]:
+                med = f"{b['median']:+.2f}s" if b["median"] is not None else "n/a"
+                print(f"plan-vs-you braking onset {label}: median lag {med} "
+                      f"(n={b['n']}, plan-never-braked {b['never']})")
+        if bs["mpc_median"] is not None:
+            print(f"  (diagnostic: chill MPC would brake {bs['mpc_median']:+.2f}s, n={bs['mpc_n']})")
         ls = cf.launch_summary()
-        if ls["n"]:
-            print(f"plan-vs-you launch onset: median lag {ls['median']:+.2f}s (n={ls['n']})")
+        for name, label in (("lead", "lead pull-away"), ("nolead", "no-lead green light")):
+            if ls[name]["n"]:
+                print(f"plan-vs-you launch onset ({label}): median lag "
+                      f"{ls[name]['median']:+.2f}s (n={ls[name]['n']})")
+        for name, label in (("free", "free road"), ("lead", "following")):
+            so = cf.speed_opinion.get(name)
+            if so:
+                d = "slower" if so["pct"] < 0 else "faster"
+                print(f"plan-vs-you speed opinion ({label}): model wants "
+                      f"{abs(so['pct']):.0f}% {d} than you drive ({so['seconds']:.0f}s)")
+        if cf.accel_rms is not None:
+            print(f"plan-vs-you accel agreement: RMS {cf.accel_rms:.2f} m/s² "
+                  f"over {cf.accel_rms_seconds:.0f}s of your cruising")
         us = cf.unwind_summary()
         if us:
             print("plan-vs-you unwind: " + ", ".join(
@@ -174,9 +189,6 @@ def main(argv: list[str] | None = None) -> int:
         if cf.path_overall is not None:
             print(f"plan-vs-you path agreement: RMS {cf.path_overall:.2f} m/s² "
                   f"over {cf.path_seconds:.0f}s of your steering")
-        for p, v in sorted(cf.follow_opinion.items()):
-            print(f"plan-vs-you follow gap ({p}): you {v['driver_median']:.2f}s vs "
-                  f"model-wants {v['target']:.2f}s ({v['seconds']:.0f}s)")
     for dim in ("mode", "personality"):
         bg = grades.breakdowns.get(dim) or {}
         scored = {b: g for b, g in bg.items() if g.score is not None}

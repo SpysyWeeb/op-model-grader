@@ -44,6 +44,9 @@ def make_drive(
         "ccAccel": 0.0,
         "aTarget": 0.0,
         "desiredCurvature": 0.0,
+        "planVisA0": 0.0,
+        "planVisDA": 0.0,
+        "planVisV4": 0.0,
     }
     bools = {
         "gasPressed": False,

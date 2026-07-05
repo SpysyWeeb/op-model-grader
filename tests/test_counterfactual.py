@@ -107,6 +107,8 @@ def test_unwind_lag_plan_earlier():
 
 
 def _stop_drive(plan_lag_s: float | None, with_lead=True):
+    """Manual stop: driver decel (-1.5) starts at t=10; the vision plan's
+    accel drops below -0.5 at (driver onset + plan_lag_s)."""
     dur = 60.0
     n = int(dur / DT)
     t = np.arange(n) * DT
@@ -117,40 +119,61 @@ def _stop_drive(plan_lag_s: float | None, with_lead=True):
     v[dec] = 15.0 - 1.5 * (t[dec] - 10)
     a[dec] = -1.5
     v[t >= 20] = 0.0
-    # stop window starts at last v>=8: t0 = 10 + 7/1.5
-    t_win = 10 + 7 / 1.5
-    at = np.zeros(n)
+    # centered 0.31 s MA over the step: crossing when 1/3 of the window is
+    # past the step -> t = 10 - h + 2h/3 = 10 - h/3 with h = 0.155
+    t_driver = 10.0 - 0.155 / 3
+    vis = np.zeros(n)
     if plan_lag_s is not None:
-        at[t >= t_win + plan_lag_s] = -2.0
+        vis[t >= t_driver + plan_lag_s] = -2.0
     return make_drive(dur, vEgo=v, aEgo=a, brakePressed=dec, standstill=v < 0.1,
                       leadStatus=with_lead, leadDRel=30.0 if with_lead else 0.0,
-                      leadVLead=np.maximum(v - 1.0, 0.0), aTarget=at)
+                      leadVLead=np.maximum(v - 1.0, 0.0), planVisA0=vis)
 
 
-def test_braking_onset_lag():
+def test_braking_onset_lag_with_lead():
     cf, cf_events, _da = _run(_stop_drive(0.3))
-    assert cf.braking_summary()["n"] == 1
-    assert cf.braking[0]["lag"] == pytest.approx(0.3, abs=0.06)
-    assert cf.braking_never == 0
-    assert any(e.kind == "cf_brake" for e in cf_events)
+    bs = cf.braking_summary()
+    assert bs["lead"]["n"] == 1
+    assert bs["lead"]["median"] == pytest.approx(0.3, abs=0.08)
+    assert bs["nolead"]["n"] == 0
+    assert any(e.kind == "cf_brake" and e.values["lead"] for e in cf_events)
 
 
-def test_braking_plan_never_brakes():
-    cf, _ev, _da = _run(_stop_drive(None))
-    assert cf.braking_never == 1
-    assert cf.braking_summary()["n"] == 0
+def test_braking_onset_no_lead_red_light():
+    """Leadless stop (red light): the vision plan brakes 0.4 s EARLIER."""
+    cf, cf_events, _da = _run(_stop_drive(-0.4, with_lead=False))
+    bs = cf.braking_summary()
+    assert bs["nolead"]["n"] == 1
+    assert bs["nolead"]["median"] == pytest.approx(-0.4, abs=0.08)
+    assert bs["lead"]["n"] == 0
+    ev = next(e for e in cf_events if e.kind == "cf_brake")
+    assert ev.values["lead"] is False
 
 
-def test_braking_requires_lead():
-    cf, cf_events, _da = _run(_stop_drive(0.3, with_lead=False))
-    assert cf.braking_summary()["n"] == 0
-    assert cf.braking_skipped_no_lead == 1
-    assert not any(e.kind == "cf_brake" for e in cf_events)
+def test_braking_plan_never_brakes_counts_per_bucket():
+    cf, _ev, _da = _run(_stop_drive(None, with_lead=False))
+    bs = cf.braking_summary()
+    assert bs["nolead"]["never"] == 1 and bs["nolead"]["n"] == 0
+    cf2, _ev2, _da2 = _run(_stop_drive(None, with_lead=True))
+    assert cf2.braking_summary()["lead"]["never"] == 1
+
+
+def test_mpc_diagnostic_lag():
+    d = _stop_drive(0.0)
+    t = np.arange(int(60.0 / DT)) * DT
+    at = np.zeros(len(t))
+    at[t >= 11.0] = -2.0  # MPC brakes ~0.9 s after the driver
+    d.channels["aTarget"].v[:] = at
+    cf, _ev, _da = _run(d)
+    bs = cf.braking_summary()
+    assert bs["mpc_n"] == 1
+    # MPC at 11.0 vs driver crossing at ~9.95
+    assert bs["mpc_median"] == pytest.approx(1.05, abs=0.1)
 
 
 def test_launch_onset_plan_earlier():
-    """Manual pull-away: driver responds 1.5 s after lead moves, plan +0.3
-    crossing at 0.8 s -> lag -0.7."""
+    """Manual pull-away: driver responds 1.5 s after lead moves, vision plan
+    +0.3 crossing at 0.8 s -> lag -0.7."""
     dur = 40.0
     n = int(dur / DT)
     t = np.arange(n) * DT
@@ -160,14 +183,65 @@ def test_launch_onset_plan_earlier():
     v[go] = np.minimum(1.0 * (t[go] - 11.5), 8.0)
     a[go] = np.where(v[go] < 8.0, 1.0, 0.0)
     v_lead = np.where(t >= 10.0, 1.0, 0.0)
-    at = np.where(t >= 10.8, 1.0, 0.0)
+    vis = np.where(t >= 10.8, 1.0, 0.0)
 
     d = make_drive(dur, vEgo=v, aEgo=a, leadStatus=True, leadDRel=8.0,
-                   leadVLead=v_lead, standstill=v < 0.1, aTarget=at)
+                   leadVLead=v_lead, standstill=v < 0.1, planVisA0=vis)
     cf, cf_events, _da = _run(d)
-    assert cf.launch_summary()["n"] == 1
-    assert cf.launch[0]["lag"] == pytest.approx(-0.7, abs=0.1)
+    ls = cf.launch_summary()
+    assert ls["lead"]["n"] == 1
+    assert ls["lead"]["median"] == pytest.approx(-0.7, abs=0.1)
     assert any(e.kind == "cf_launch" for e in cf_events)
+
+
+def test_launch_onset_no_lead_green_light():
+    """No lead: plan rises at 19.5; first motion (v > 0.15) at 20.15 -> lag -0.65."""
+    dur = 60.0
+    n = int(dur / DT)
+    t = np.arange(n) * DT
+    v = np.zeros(n)
+    a = np.zeros(n)
+    go = t >= 20.0  # first motion at t=20
+    v[go] = np.minimum(1.0 * (t[go] - 20.0), 10.0)
+    a[go] = np.where(v[go] < 10.0, 1.0, 0.0)
+    vis = np.where(t >= 19.5, 1.0, 0.0)
+
+    d = make_drive(dur, vEgo=v, aEgo=a, standstill=v < 0.1, planVisA0=vis)
+    cf, _ev, _da = _run(d)
+    ls = cf.launch_summary()
+    assert ls["nolead"]["n"] == 1
+    assert ls["nolead"]["median"] == pytest.approx(-0.65, abs=0.06)
+
+
+def test_speed_opinion_and_accel_rms():
+    """Model plans 90% of the driver's speed -> 'wants 10% slower'."""
+    n = int(60.0 / DT)
+    d = make_drive(60.0, vEgo=10.0, planVisV4=9.0, planVisA0=0.3)
+    cf, _ev, _da = _run(d)
+    assert "free" in cf.speed_opinion
+    so = cf.speed_opinion["free"]
+    assert so["median_ratio"] == pytest.approx(0.9, abs=0.01)
+    assert so["pct"] == pytest.approx(-10.0, abs=1.0)
+    assert "lead" not in cf.speed_opinion
+    assert cf.accel_rms == pytest.approx(0.3, abs=0.02)  # planned 0.3 vs actual 0
+
+
+def test_speed_opinion_excludes_stop_runup():
+    """The 8 s before a standstill are excluded from X2."""
+    dur = 60.0
+    n = int(dur / DT)
+    t = np.arange(n) * DT
+    v = np.full(n, 10.0)
+    dec = (t >= 30) & (t < 35)
+    v[dec] = 10.0 - 2.0 * (t[dec] - 30)
+    v[t >= 35] = 0.0
+    d = make_drive(dur, vEgo=v, planVisV4=9.0, standstill=v < 0.1)
+    cf, _ev, _da = _run(d)
+    so = cf.speed_opinion.get("free")
+    assert so is not None
+    # v>5 lasts until t=32.5 (32.5 s of samples); the exclusion removes
+    # [26.85, 34.85] (8 s before v<0.3 at ~34.85), leaving ~26.9 s
+    assert 20.0 < so["seconds"] < 28.5
 
 
 def test_path_agreement_bins():
@@ -189,33 +263,13 @@ def test_path_agreement_excludes_model_steering():
     assert cf.path_overall is None  # no manual-lat samples at all
 
 
-def test_follow_opinion_gated_on_lead_source():
-    n = int(60.0 / DT)
-    common = dict(vEgo=15.0, leadStatus=True, leadVLead=15.0,
-                  leadDRel=1.2 * 15.0 + 6.0,  # driver's effective gap 1.2 s
-                  personality=np.zeros(n, np.int16))  # aggressive
-    d = make_drive(60.0, planSource=np.full(n, 1, np.int16), **common)  # lead0
-    cf, _ev, _da = _run(d, targets={"aggressive": 1.0, "standard": 1.45, "relaxed": 1.75})
-    assert "aggressive" in cf.follow_opinion
-    fo = cf.follow_opinion["aggressive"]
-    assert fo["driver_median"] == pytest.approx(1.2, abs=0.02)
-    assert fo["target"] == pytest.approx(1.0)
-    assert fo["seconds"] > 30
-
-    # same drive but e2e plan source -> excluded, with the explanatory note
-    d2 = make_drive(60.0, planSource=np.full(n, 4, np.int16), **common)
-    cf2, _ev2, _da2 = _run(d2)
-    assert cf2.follow_opinion == {}
-    assert "lead constraint" in cf2.follow_opinion_note
-
-
 def test_unavailable_without_plan_channels():
     d = make_drive(30.0, vEgo=10.0)
     from opgrader.extract import Channel
 
-    d.channels["desiredCurvature"] = Channel(np.array([]), np.array([]))
-    d.channels["aTarget"] = Channel(np.array([]), np.array([]))
-    d.channels["planSource"] = Channel(np.array([]), np.array([], dtype=np.int16))
+    for ch in ("desiredCurvature", "aTarget", "planSource",
+               "planVisA0", "planVisDA", "planVisV4"):
+        d.channels[ch] = Channel(np.array([]), np.array([]))
     cf, _ev, _da = _run(d)
     assert cf.available is False
     assert "neither" in cf.why_unavailable

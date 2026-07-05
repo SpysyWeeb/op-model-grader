@@ -115,8 +115,10 @@ def _series_for_event(ev: Event, da: DriveArrays) -> list[dict]:
             out.append({"label": "steering angle", "unit": "°", "data": ds(da.steering_angle[sl])})
         out.append({"label": "vEgo", "unit": "m/s", "data": ds(da.v[sl])})
     elif ev.kind in ("cf_brake", "cf_launch"):
+        if da.vis_accel is not None:
+            out.append({"label": "planned accel (vision)", "unit": "m/s²", "data": ds(da.vis_accel[sl])})
         if da.a_target is not None:
-            out.append({"label": "planned accel", "unit": "m/s²", "data": ds(da.a_target[sl])})
+            out.append({"label": "planned accel (MPC, diagnostic)", "unit": "m/s²", "data": ds(da.a_target[sl])})
         out.append({"label": "aEgo", "unit": "m/s²", "data": ds(da.a[sl])})
         out.append({"label": "vEgo", "unit": "m/s", "data": ds(da.v[sl])})
         if da.d_rel is not None and da.lead_status is not None:
@@ -156,6 +158,8 @@ def _event_payload(ev: Event, da: DriveArrays, t_drive0: float) -> dict:
             tag += " · MISSED"
     elif ev.kind in ("cf_turnin", "cf_brake", "cf_launch"):
         tag = str(ev.values.get("side", ""))
+        if "lead" in ev.values:
+            tag = (tag + (" lead" if ev.values["lead"] else " NO-LEAD")).strip()
         if ev.values.get("never_planned"):
             tag = (tag + " · NEVER PLANNED").strip(" ·")
         elif ev.values.get("censored"):
@@ -447,47 +451,67 @@ def _counterfactual_section(cf) -> str:
   positive = model would straighten later: {rows}.</p>
 </div>""")
 
-    # C1 braking
+    # X1 braking onset (vision plan), no-lead row first — the red-light measure
     bs = cf.braking_summary()
-    if bs["n"] or bs["never"]:
+    if bs["nolead"]["n"] or bs["lead"]["n"] or bs["nolead"]["never"] or bs["lead"]["never"]:
+        def _brow(label, b):
+            return (f"<tr><td>{label}</td><td><strong>{_lagfmt(b['median'])} s</strong></td>"
+                    f"<td>{b['n']}</td><td>{b['never']}</td></tr>")
+        mpc = ""
+        if bs["mpc_median"] is not None:
+            mpc = (f'<p class="muted">Diagnostic: the chill MPC plan would have braked '
+                   f'{_lagfmt(bs["mpc_median"])} s vs you (n={bs["mpc_n"]}) — not scored, '
+                   f'the MPC is meaningless without a cruise target.</p>')
         parts.append(f"""
 <div class="card">
-  <h3>Counterfactual braking onset <span class="muted">(your stops behind a lead)</span></h3>
-  <p>Planned accel crossing −0.5 m/s² vs yours (positive = model would brake later):
-  median <strong>{_lagfmt(bs['median'])} s</strong>, n={bs['n']}.
-  Plan never reached −0.5: {bs['never']}. Stops without a lead skipped: {bs['skipped_no_lead']}
-  (with cruise unset, the plan only reliably brakes when a lead — or, in experimental mode,
-  the e2e model — constrains it).</p>
+  <h3>Counterfactual braking onset <span class="muted">(vision plan, your stop approaches)</span></h3>
+  <p>Planned accel crossing −0.5 m/s² vs yours (positive = model would brake later).
+  The <strong>no-lead row is the red-light/stop-sign measure</strong>: nothing but the
+  end-to-end model's road reading makes it brake there.</p>
+  <table class="mtable"><thead><tr><th></th><th>Median lag</th><th>n</th><th>plan never braked</th></tr></thead>
+  <tbody>{_brow("No lead (lights/signs)", bs["nolead"])}{_brow("Behind a lead", bs["lead"])}</tbody></table>
+  {mpc}
 </div>""")
 
-    # C2 launch
+    # X2 desired-speed agreement
+    if cf.accel_rms is not None or cf.speed_opinion:
+        srows = ""
+        for name, label in (("free", "Free road"), ("lead", "Following a lead")):
+            so = cf.speed_opinion.get(name)
+            if so:
+                direction = "slower" if so["pct"] < 0 else "faster"
+                srows += (f"<tr><td>{label}</td><td><strong>{abs(so['pct']):.0f}% {direction}</strong> "
+                          f"(ratio {so['median_ratio']:.3f})</td><td>{so['seconds']:.0f}s</td></tr>")
+        rms_txt = (f"Planned-vs-realized accel RMS disagreement: "
+                   f"<strong>{cf.accel_rms:.2f} m/s²</strong> over {cf.accel_rms_seconds:.0f} s. "
+                   if cf.accel_rms is not None else "")
+        parts.append(f"""
+<div class="card">
+  <h3>Desired-speed agreement <span class="muted">(vision plan, your cruising)</span></h3>
+  <p>{rms_txt}Model's planned speed 4 s ahead vs the speed you actually drove 4 s later
+  ("the model wants to go..."):</p>
+  <table class="mtable"><thead><tr><th></th><th>Model wants</th><th>Time</th></tr></thead>
+  <tbody>{srows or '<tr><td colspan=3 class="muted">insufficient data</td></tr>'}</tbody></table>
+</div>""")
+
+    # X3 launch
     ls = cf.launch_summary()
-    if ls["n"]:
+    if ls["lead"]["n"] or ls["nolead"]["n"]:
+        rows = ""
+        if ls["lead"]["n"]:
+            rows += (f"<tr><td>Lead pull-away</td><td><strong>{_lagfmt(ls['lead']['median'])} s</strong></td>"
+                     f"<td>{ls['lead']['n']}</td></tr>")
+        if ls["nolead"]["n"]:
+            rows += (f"<tr><td>No lead (green light), vs your first motion</td>"
+                     f"<td><strong>{_lagfmt(ls['nolead']['median'])} s</strong></td>"
+                     f"<td>{ls['nolead']['n']}</td></tr>")
         parts.append(f"""
 <div class="card">
-  <h3>Counterfactual launch onset <span class="muted">(your lead pull-aways)</span></h3>
-  <p>Planned accel crossing +0.3 m/s² after the lead moves vs your response
-  (positive = model would launch later): median <strong>{_lagfmt(ls['median'])} s</strong>, n={ls['n']}.</p>
-</div>""")
-
-    # C3 follow opinion
-    if cf.follow_opinion:
-        rows = "".join(
-            f"<tr><td>{_esc(p)}</td><td>{v['driver_median']:.2f} s</td>"
-            f"<td>{v['target']:.2f} s</td><td>{v['seconds']:.0f}s</td></tr>"
-            for p, v in sorted(cf.follow_opinion.items())
-        )
-        parts.append(f"""
-<div class="card">
-  <h3>Follow-gap opinion <span class="muted">(lead-constrained plan samples only)</span></h3>
-  <table class="mtable"><thead><tr><th>Personality</th><th>You follow</th><th>Model wants (target)</th><th>Time</th></tr></thead>
+  <h3>Counterfactual launch onset <span class="muted">(vision plan)</span></h3>
+  <p>Planned accel crossing +0.3 m/s² vs your response (positive = model later):</p>
+  <table class="mtable"><thead><tr><th></th><th>Median lag</th><th>n</th></tr></thead>
   <tbody>{rows}</tbody></table>
-  <p class="muted">Restricted to samples where longitudinalPlanSource is a lead source — in
-  experimental mode the e2e planner dominates and doesn't pursue the personality target.</p>
 </div>""")
-    elif cf.follow_opinion_note:
-        parts.append(f'<div class="card"><h3>Follow-gap opinion</h3>'
-                     f'<p class="muted">{_esc(cf.follow_opinion_note)}.</p></div>')
 
     if not parts:
         return ""
@@ -495,8 +519,10 @@ def _counterfactual_section(cf) -> str:
 <section>
   <h2>Plan vs You (counterfactual)</h2>
   <div class="warn">Computed from the model's live plan during YOUR driving (it keeps planning
-  while disengaged). Timing comparisons are robust; magnitudes are indicative only — the plan is
-  conditioned on the situation you created. These numbers are NOT part of the grades above.</div>
+  while disengaged). Longitudinal counterfactuals use the end-to-end (vision) model plan — what
+  Experimental mode executes — not the chill MPC. Timing comparisons are robust; magnitudes are
+  indicative only — the plan is conditioned on the situation you created. These numbers are NOT
+  part of the grades above.</div>
   {''.join(parts)}
 </section>"""
 

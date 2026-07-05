@@ -121,6 +121,8 @@ _SPECS = {
     "planSource": ("longitudinalPlan", ["longitudinalPlanSource.raw"], _INT),
     # modelV2 @ ~20 Hz: the model's live plan (runs even while disengaged)
     "desiredCurvature": ("modelV2", ["action.desiredCurvature"], _FLOAT),
+    "planVisA0": ("modelV2", ["acceleration.x[0]"], _FLOAT),
+    "planVisDA": ("modelV2", ["action.desiredAcceleration"], _FLOAT),
     # yaw rate: livePose (modern) / liveLocationKalman (old)
     "yawRate": ("livePose", ["angularVelocityDevice.z"], _FLOAT),
     "yawRateLLK": (
@@ -216,6 +218,8 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
         "cs_" + k for k in _CS_FALLBACKS
     )
 
+    acc["planVisV4"] = ([], [])
+
     personality_raw: int | None = None
     saw_selfdrive = False
 
@@ -232,6 +236,17 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
                         ts, vs = acc[key]
                         ts.append(t)
                         vs.append(val)
+                if which == "modelV2":
+                    # planned speed ~4 s ahead (velocity.t carries T_IDXS)
+                    try:
+                        vx = msg.velocity.x
+                        vt = msg.velocity.t
+                        if len(vx) >= 2 and len(vt) == len(vx):
+                            ts4, vs4 = acc["planVisV4"]
+                            ts4.append(t)
+                            vs4.append(float(np.interp(4.0, list(vt), list(vx))))
+                    except Exception:
+                        pass
                 if which == "selfdriveState":
                     saw_selfdrive = True
                     try:
@@ -315,6 +330,7 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
 
     for key, (which, _p, dtype) in _SPECS.items():
         drive.channels[key] = to_channel(key, dtype)
+    drive.channels["planVisV4"] = to_channel("planVisV4", _FLOAT)
 
     # enable-state fallback: prefer selfdriveState, else controlsState
     if not saw_selfdrive:

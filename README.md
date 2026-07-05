@@ -172,13 +172,18 @@ magnitudes indicative):
   the turn at all (planned curvature never reaching 30% of your peak)?
 - **Counterfactual unwind** — would the plan straighten out of sharp turns
   earlier/later than you did?
-- **Braking / launch onset** — behind a lead, when would the planned accel
-  have crossed −0.5 / +0.3 m/s² vs your actual response? Stops without a
-  lead are skipped: with cruise unset the plan only reliably brakes when a
-  lead (or the e2e model in experimental mode) constrains it.
-- **Follow-gap opinion** — on samples where the lead constraint provably
-  binds (longitudinalPlanSource = lead), your held gap vs the target the
-  plan pursues.
+- **Braking onset (the red-light row)** — when would the vision plan's
+  accel have crossed −0.5 m/s² vs yours, split **no-lead (lights/signs)**
+  vs behind-a-lead? Longitudinal counterfactuals use the end-to-end model
+  trajectory (what Experimental mode executes) — it brakes for road
+  context without needing a lead or a cruise setpoint. The chill MPC is
+  shown only as an unscored diagnostic (meaningless without a set speed).
+- **Desired-speed agreement** — planned-vs-realized accel RMS, and the
+  model's planned speed 4 s ahead vs the speed you actually drove 4 s
+  later ("the model wants to go N% slower/faster"), free-road vs
+  following.
+- **Launch onset** — lead pull-aways and no-lead green lights: planned
+  accel crossing +0.3 m/s² vs your response.
 
 ### Mode & personality breakdowns
 

@@ -11,13 +11,17 @@ Empirical grounding (verified on the owner's 0.11.2 logs, see tests):
   disengaged (corr -0.93, magnitude ratio 0.98 against steering-derived
   curvature) but SIGN-INVERTED vs the ISO left-positive convention, matching
   openpilot's actuators.curvature. We use plan_left = -desiredCurvature.
-- longitudinalPlan.aTarget is live while long is disengaged and properly
-  negative when braking behind a lead (median -1.09 m/s2) but weak for
-  no-lead stops (median -0.15, cruise unset plans toward max speed) =>
-  braking-onset comparison is gated on a lead being present at approach
-  start. The follow-gap opinion is additionally gated on
-  longitudinalPlanSource being a lead source (lead0/1/2): in experimental
-  mode the e2e source dominates and is not target-following.
+- Longitudinal counterfactuals use the VISION (end-to-end) plan -- the
+  modelV2 velocity/acceleration trajectory that Experimental mode executes.
+  It needs no lead and no cruise setpoint and reacts to lights/signs.
+  Verified live while disengaged: 33-point arrays with velocity.t carrying
+  T_IDXS (0..10 s), velocity.x[0] tracking vEgo (corr 0.997),
+  acceleration.x[0] matching action.desiredAcceleration (corr 0.876);
+  during leadless driver braking the planned accel p25 is -1.02 m/s2 (it
+  does plan stops for lights, measured per event as onset lag). The chill
+  MPC longitudinalPlan is deliberately NOT used for grading ("accelerate to
+  set speed, match the lead" -- meaningless without a cruise target); its
+  braking onset is shown as an unscored diagnostic only.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ import numpy as np
 
 from .events import DriveArrays, Event
 from .lateral import MPH, PP_BINS_MPH, TurnEpisode, IntentWindow
-from .metrics import effective_t_follow, smooth
+from .metrics import smooth
 from .segments import _contiguous_runs
 
 # thresholds
@@ -37,9 +41,10 @@ LAUNCH_ACCEL = 0.3  # m/s^2: "launch has begun" for the plan
 TURN_IN_FRACTION = 0.30  # plan onset = crossing 30% of driver's peak curvature
 UNWIND_FRACTION = 0.5
 MIN_SPEED_PATH = 3.0  # m/s: path agreement needs the car to be moving
-BRAKE_LEAD_DREL = 60.0  # lead must be present & closer than this at approach start
-LEAD_SOURCES = (1, 2, 3)  # longitudinalPlanSource: lead0, lead1, lead2
+BRAKE_LEAD_DREL = 60.0  # lead-vs-no-lead split threshold at approach start
 ONSET_CAP_S = 6.0
+SPEED_OPINION_HORIZON_S = 4.0
+STANDSTILL_EXCLUDE_S = 8.0  # drop the run-up to every stop from X2
 
 
 @dataclass
@@ -54,14 +59,17 @@ class Counterfactual:
     turn_in: list[dict] = field(default_factory=list)  # per-window rows
     # L3: manual sharp-turn unwind lags per side
     unwind: list[dict] = field(default_factory=list)
-    # C1 / C2
-    braking: list[dict] = field(default_factory=list)
-    launch: list[dict] = field(default_factory=list)
-    braking_never: int = 0  # windows where the plan never reached BRAKE_ACCEL
-    braking_skipped_no_lead: int = 0
-    # C3 per personality: driver's gap vs the target the plan pursues
-    follow_opinion: dict = field(default_factory=dict)
-    follow_opinion_note: str = ""
+    # X1 stop-approach onset, split by lead presence at approach start
+    braking: list[dict] = field(default_factory=list)  # rows carry "lead": bool
+    braking_never_lead: int = 0
+    braking_never_nolead: int = 0
+    mpc_brake_lags: list[float] = field(default_factory=list)  # diagnostic only
+    # X2 desired-speed agreement over manual cruising samples
+    accel_rms: float | None = None  # planned-vs-realized accel RMS (m/s^2)
+    accel_rms_seconds: float = 0.0
+    speed_opinion: dict = field(default_factory=dict)  # {"free"/"lead": {...}}
+    # X3 launch onset
+    launch: list[dict] = field(default_factory=list)  # rows carry "lead": bool
 
     # ---- aggregates used by report/CLI
     def turn_in_summary(self) -> dict:
@@ -90,19 +98,32 @@ class Counterfactual:
         return out
 
     def braking_summary(self) -> dict:
-        lags = [r["lag"] for r in self.braking]
-        return {
-            "n": len(lags),
-            "median": float(np.median(lags)) if lags else None,
-            "never": self.braking_never,
-            "skipped_no_lead": self.braking_skipped_no_lead,
-            "lags": lags,
-        }
+        out = {}
+        for name, has_lead, never in (
+            ("nolead", False, self.braking_never_nolead),
+            ("lead", True, self.braking_never_lead),
+        ):
+            lags = [r["lag"] for r in self.braking if r["lead"] == has_lead]
+            out[name] = {
+                "n": len(lags),
+                "median": float(np.median(lags)) if lags else None,
+                "never": never,
+                "lags": lags,
+            }
+        out["mpc_median"] = (
+            float(np.median(self.mpc_brake_lags)) if self.mpc_brake_lags else None
+        )
+        out["mpc_n"] = len(self.mpc_brake_lags)
+        return out
 
     def launch_summary(self) -> dict:
-        lags = [r["lag"] for r in self.launch]
-        return {"n": len(lags), "median": float(np.median(lags)) if lags else None,
-                "lags": lags}
+        out = {}
+        for name, has_lead in (("lead", True), ("nolead", False)):
+            lags = [r["lag"] for r in self.launch if r.get("lead", True) == has_lead]
+            out[name] = {"n": len(lags),
+                         "median": float(np.median(lags)) if lags else None,
+                         "lags": lags}
+        return out
 
 
 def _actual_curvature(da: DriveArrays, vm) -> np.ndarray | None:
@@ -136,9 +157,9 @@ def analyze_counterfactual(
     events: list[Event] = []
 
     have_curv = any(da.desired_curv is not None for _d, _s, da, _e in per_drive)
-    have_plan = any(da.a_target is not None for _d, _s, da, _e in per_drive)
-    if not (have_curv or have_plan):
-        cf.why_unavailable = "logs carry neither modelV2 nor longitudinalPlan"
+    have_vis = any(da.vis_accel is not None for _d, _s, da, _e in per_drive)
+    if not (have_curv or have_vis):
+        cf.why_unavailable = "logs carry neither modelV2 plan trajectories nor its action"
         return cf, events
     cf.available = True
 
@@ -242,104 +263,150 @@ def analyze_counterfactual(
         cf.unwind.append({"side": ep.side, "drive": ep.drive,
                           "lag": float(t[iup] - t[iua])})
 
-    # ---------------- C1: braking onset on manual stops behind a lead
+    # ---------------- X1: stop-approach onset (vision plan), lead / no-lead
     for drive, _seg, da, evs in per_drive:
-        if da.a_target is None:
-            continue
         a_s = smooth(da.t, da.a)
         for ev in evs:
-            if ev.kind == "stop" and not ev.engaged:
-                sl = slice(ev.i0, ev.i1)
+            if ev.kind == "stop" and not ev.engaged and da.vis_accel is not None:
+                # search onsets from up to 8 s BEFORE the stop window opens
+                # (braking usually starts before v falls under the window's
+                # v>=8 anchor; without the extension both onsets pin to the
+                # window start and every lag reads 0)
+                i_pre = int(np.searchsorted(da.t, da.t[ev.i0] - 8.0))
+                if np.any(np.diff(da.t[i_pre:ev.i0 + 1]) > 1.0):
+                    i_pre = ev.i0  # don't cross an inter-segment gap
+                sl = slice(i_pre, ev.i1)
                 t = da.t[sl]
-                lead_ok = (
+                has_lead = bool(
                     da.lead_status is not None and da.d_rel is not None
                     and bool(da.lead_status[ev.i0])
                     and float(da.d_rel[ev.i0]) < BRAKE_LEAD_DREL
                 )
-                if not lead_ok:
-                    cf.braking_skipped_no_lead += 1
-                    continue
                 i_driver = _first_cross(t, a_s[sl] < BRAKE_ACCEL)
-                i_plan = _first_cross(t, da.a_target[sl] < BRAKE_ACCEL)
                 if i_driver is None:
                     continue
+                i_plan = _first_cross(t, da.vis_accel[sl] < BRAKE_ACCEL)
                 if i_plan is None:
-                    cf.braking_never += 1
+                    if has_lead:
+                        cf.braking_never_lead += 1
+                    else:
+                        cf.braking_never_nolead += 1
+                    lag = None
                 else:
                     lag = float(t[i_plan] - t[i_driver])
-                    cf.braking.append({"drive": drive.name, "t0": float(t[0]), "lag": lag})
+                    cf.braking.append({"drive": drive.name, "t0": float(t[0]),
+                                       "lag": lag, "lead": has_lead})
+                # unscored diagnostic: where would the chill MPC have braked?
+                if da.a_target is not None and i_plan is not None:
+                    im = _first_cross(t, da.a_target[sl] < BRAKE_ACCEL)
+                    if im is not None:
+                        cf.mpc_brake_lags.append(float(t[im] - t[i_driver]))
                 events.append(Event(
                     kind="cf_brake", engaged=False, drive=drive.name,
-                    t0=float(t[0]), t1=float(t[-1]), i0=ev.i0, i1=ev.i1,
+                    t0=float(t[0]), t1=float(t[-1]), i0=i_pre, i1=ev.i1,
                     has_override=False,
-                    values={"lag": None if i_plan is None else float(t[i_plan] - t[i_driver]),
-                            "never_planned": i_plan is None},
+                    values={"lag": lag, "never_planned": i_plan is None,
+                            "lead": has_lead},
                 ))
-            elif ev.kind == "pullaway" and not ev.engaged:
-                # ---------------- C2: launch onset on manual lead pull-aways
+            elif ev.kind == "pullaway" and not ev.engaged and da.vis_accel is not None:
+                # ------------- X3 (lead): launch onset on manual pull-aways
                 sl = slice(ev.i0, ev.i1)
                 t = da.t[sl]
                 t_onset = ev.values.get("t_onset")
                 driver_lat = ev.values.get("latency")
                 if t_onset is None or driver_lat is None:
                     continue
-                after = t >= t_onset
-                horizon = after & (t <= t_onset + ONSET_CAP_S)
-                ip = _first_cross(t, horizon & (da.a_target[sl] > LAUNCH_ACCEL))
+                horizon = (t >= t_onset) & (t <= t_onset + ONSET_CAP_S)
+                ip = _first_cross(t, horizon & (da.vis_accel[sl] > LAUNCH_ACCEL))
                 plan_lat = float(t[ip] - t_onset) if ip is not None else ONSET_CAP_S
                 lag = plan_lat - float(driver_lat)
                 cf.launch.append({"drive": drive.name, "t0": float(t[0]), "lag": lag,
-                                  "censored": ip is None})
+                                  "censored": ip is None, "lead": True})
                 events.append(Event(
                     kind="cf_launch", engaged=False, drive=drive.name,
                     t0=float(t[0]), t1=float(t[-1]), i0=ev.i0, i1=ev.i1,
                     has_override=False,
-                    values={"lag": lag, "censored": ip is None},
+                    values={"lag": lag, "censored": ip is None, "lead": True},
+                ))
+            elif ev.kind == "launch" and not ev.engaged and da.vis_accel is not None:
+                # ------------- X3 (no lead): light turns green, no lead ahead
+                if da.lead_status is not None and bool(da.lead_status[ev.i0]):
+                    continue  # lead launches are covered by pull-aways
+                sl = slice(ev.i0, ev.i1)
+                t = da.t[sl]
+                t_fm = ev.values.get("t_first_motion")
+                if t_fm is None:
+                    continue
+                # plan rise relative to the driver's first motion (the plan
+                # may rise BEFORE the driver moves -> negative lag)
+                ip = _first_cross(t, da.vis_accel[sl] > LAUNCH_ACCEL)
+                if ip is None:
+                    continue
+                lag = float(t[ip] - t_fm)
+                cf.launch.append({"drive": drive.name, "t0": float(t[0]), "lag": lag,
+                                  "censored": False, "lead": False})
+                events.append(Event(
+                    kind="cf_launch", engaged=False, drive=drive.name,
+                    t0=float(t[0]), t1=float(t[-1]), i0=ev.i0, i1=ev.i1,
+                    has_override=False,
+                    values={"lag": lag, "censored": False, "lead": False},
                 ))
 
-    # ---------------- C3: follow-gap opinion (lead-source samples only)
-    by_p: dict[str, list] = {}
-    secs: dict[str, float] = {}
-    have_source = any(da.plan_source is not None for _d, _s, da, _e in per_drive)
+    # ---------------- X2: desired-speed agreement over manual cruising
+    rms_ss, rms_n, rms_secs = 0.0, 0, 0.0
+    op_ratios: dict[str, list] = {"free": [], "lead": []}
+    op_secs: dict[str, float] = {"free": 0.0, "lead": 0.0}
     for drive, _seg, da, _evs in per_drive:
-        if da.d_rel is None or da.v_lead is None or da.plan_source is None \
-                or da.personality is None:
+        if da.vis_accel is None or len(da.t) < 10:
             continue
-        dt = float(np.median(np.diff(da.t))) if len(da.t) > 1 else 0.01
-        # whole-timeline steady-follow mask (a 15 s contiguous follow window
-        # is not required: lead-source plan samples are sparse under e2e)
+        t = da.t
         v = da.v
-        vl = da.v_lead
-        mask = (
-            ~da.long_model
-            & (v > 8.0)
-            & (da.lead_status if da.lead_status is not None else True)
-            & (np.abs(vl - v) < 1.5)
-            & (np.abs(da.a) < 0.5)
-            & np.isin(da.plan_source, LEAD_SOURCES)
-        )
-        if not mask.any():
+        dt = float(np.median(np.diff(t)))
+        # exclude the STANDSTILL_EXCLUDE_S run-up to every stop
+        excl = np.zeros(len(t), bool)
+        for a0i, _b in _contiguous_runs(v < 0.3):
+            j = np.searchsorted(t, t[a0i] - STANDSTILL_EXCLUDE_S)
+            excl[j:a0i + 1] = True
+        base = ~da.long_model & (v > 5.0) & ~excl
+
+        # (a) planned vs realized accel RMS
+        m = base & np.isfinite(da.vis_accel)
+        if m.any():
+            diff = da.vis_accel[m] - da.a[m]
+            rms_ss += float(np.sum(np.square(diff)))
+            rms_n += int(m.sum())
+            rms_secs += float(m.sum()) * dt
+
+        # (b) speed opinion: planned speed 4 s ahead vs actual speed 4 s later
+        if da.vis_v4 is None:
             continue
-        eff = effective_t_follow(v, vl, da.d_rel)
-        pers = da.personality
-        for idx, name in ((0, "aggressive"), (1, "standard"), (2, "relaxed")):
-            m = mask & (pers == idx) & np.isfinite(eff)
-            if m.any():
-                by_p.setdefault(name, []).append(eff[m])
-                secs[name] = secs.get(name, 0.0) + float(m.sum()) * dt
-    for name, chunks in by_p.items():
-        allv = np.concatenate(chunks)
-        cf.follow_opinion[name] = {
-            "driver_median": float(np.median(allv)),
-            "target": float(t_follow_targets.get(name, 0.0)),
-            "seconds": secs.get(name, 0.0),
-        }
-    if not have_source:
-        cf.follow_opinion_note = "plan source not in these logs; C3 skipped"
-    elif not cf.follow_opinion:
-        cf.follow_opinion_note = (
-            "no manual steady-follow samples where the lead constraint binds "
-            "(plan source is mostly e2e in experimental mode)"
+        i4 = np.searchsorted(t, t + SPEED_OPINION_HORIZON_S)
+        ok = base & (i4 < len(t)) & np.isfinite(da.vis_v4)
+        # the future sample must be continuous driving (no gap crossing)
+        ok &= (t[np.minimum(i4, len(t) - 1)] - t) < SPEED_OPINION_HORIZON_S + 1.0
+        if not ok.any():
+            continue
+        actual4 = v[np.minimum(i4, len(t) - 1)]
+        ratio = da.vis_v4[ok] / np.maximum(actual4[ok], 0.5)
+        lead_here = (
+            da.lead_status[ok]
+            if da.lead_status is not None
+            else np.zeros(int(ok.sum()), bool)
         )
+        for name, mm in (("lead", lead_here), ("free", ~lead_here)):
+            if mm.any():
+                op_ratios[name].append(ratio[mm])
+                op_secs[name] += float(mm.sum()) * dt
+    if rms_n > 100:
+        cf.accel_rms = float(np.sqrt(rms_ss / rms_n))
+        cf.accel_rms_seconds = rms_secs
+    for name, chunks in op_ratios.items():
+        if chunks and op_secs[name] >= 10.0:
+            allr = np.concatenate(chunks)
+            cf.speed_opinion[name] = {
+                "median_ratio": float(np.median(allr)),
+                "pct": 100.0 * (float(np.median(allr)) - 1.0),
+                "seconds": op_secs[name],
+            }
 
     return cf, events

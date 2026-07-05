@@ -82,6 +82,8 @@ class DriveArrays:
     a_target: np.ndarray | None  # planned accel (longitudinalPlan.aTarget)
     plan_source: np.ndarray | None  # longitudinalPlanSource raw enum
     desired_curv: np.ndarray | None  # modelV2.action.desiredCurvature (raw sign)
+    vis_accel: np.ndarray | None  # vision plan accel: acceleration.x[0] (fallback action.desiredAcceleration)
+    vis_v4: np.ndarray | None  # vision planned speed ~4 s ahead
 
     @property
     def has_lead_data(self) -> bool:
@@ -177,6 +179,8 @@ def build_arrays(drive: Drive, seg: Segmentation) -> DriveArrays:
             else None
         ),
         desired_curv=f("desiredCurvature"),
+        vis_accel=(f("planVisA0") if drive.ch("planVisA0") is not None else f("planVisDA")),
+        vis_v4=f("planVisV4"),
     )
 
 
