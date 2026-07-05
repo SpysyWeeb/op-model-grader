@@ -152,6 +152,31 @@ def main(argv: list[str] | None = None) -> int:
                 f"follow adherence ({p}): holds {info['median_eff']:.2f}s vs "
                 f"{tgt:.2f}s target ({pct:.0f}% off, {info['seconds']:.0f}s of data)"
             )
+    cf = analysis.counterfactual
+    if cf is not None and cf.available:
+        ts = cf.turn_in_summary()
+        if ts["n"]:
+            lag = f"{ts['median_lag']:+.2f}s" if ts["median_lag"] is not None else "n/a"
+            print(f"plan-vs-you turn-in: median lag {lag} (n={ts['n_lag']}), "
+                  f"never planned {ts['never']}/{ts['n']}")
+        bs = cf.braking_summary()
+        if bs["n"] or bs["never"]:
+            med = f"{bs['median']:+.2f}s" if bs["median"] is not None else "n/a"
+            print(f"plan-vs-you braking onset: median lag {med} (n={bs['n']}, "
+                  f"plan-never-braked {bs['never']}, no-lead skipped {bs['skipped_no_lead']})")
+        ls = cf.launch_summary()
+        if ls["n"]:
+            print(f"plan-vs-you launch onset: median lag {ls['median']:+.2f}s (n={ls['n']})")
+        us = cf.unwind_summary()
+        if us:
+            print("plan-vs-you unwind: " + ", ".join(
+                f"{s} {v['mean']:+.2f}s (n={v['n']})" for s, v in us.items()))
+        if cf.path_overall is not None:
+            print(f"plan-vs-you path agreement: RMS {cf.path_overall:.2f} m/s² "
+                  f"over {cf.path_seconds:.0f}s of your steering")
+        for p, v in sorted(cf.follow_opinion.items()):
+            print(f"plan-vs-you follow gap ({p}): you {v['driver_median']:.2f}s vs "
+                  f"model-wants {v['target']:.2f}s ({v['seconds']:.0f}s)")
     for dim in ("mode", "personality"):
         bg = grades.breakdowns.get(dim) or {}
         scored = {b: g for b, g in bg.items() if g.score is not None}

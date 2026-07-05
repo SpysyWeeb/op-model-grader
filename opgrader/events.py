@@ -79,7 +79,9 @@ class DriveArrays:
     d_rel: np.ndarray | None
     v_lead: np.ndarray | None
     a_lead_k: np.ndarray | None
-    a_target: np.ndarray | None
+    a_target: np.ndarray | None  # planned accel (longitudinalPlan.aTarget)
+    plan_source: np.ndarray | None  # longitudinalPlanSource raw enum
+    desired_curv: np.ndarray | None  # modelV2.action.desiredCurvature (raw sign)
 
     @property
     def has_lead_data(self) -> bool:
@@ -169,6 +171,12 @@ def build_arrays(drive: Drive, seg: Segmentation) -> DriveArrays:
         v_lead=f("leadVLead"),
         a_lead_k=f("leadALeadK"),
         a_target=f("aTarget"),
+        plan_source=(
+            hold_align(drive.ch("planSource"), t, default=-1).astype(np.int16)
+            if drive.ch("planSource") is not None
+            else None
+        ),
+        desired_curv=f("desiredCurvature"),
     )
 
 

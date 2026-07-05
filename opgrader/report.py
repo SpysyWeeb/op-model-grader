@@ -35,6 +35,9 @@ KIND_LABELS = {
     "turn": "Turn episodes",
     "intent": "Blinker turn intents",
     "pingpong": "Worst oscillation windows",
+    "cf_turnin": "Plan vs You: turn-in (manual turns)",
+    "cf_brake": "Plan vs You: braking onset (manual stops)",
+    "cf_launch": "Plan vs You: launch onset (manual pull-aways)",
 }
 
 KIND_HEADLINE = {
@@ -47,6 +50,9 @@ KIND_HEADLINE = {
     "turn": ("peak_deg", "peak °"),
     "intent": ("delay", "turn-in delay s"),
     "pingpong": ("osc_rms", "osc RMS °"),
+    "cf_turnin": ("lag", "plan lag s"),
+    "cf_brake": ("lag", "plan lag s"),
+    "cf_launch": ("lag", "plan lag s"),
 }
 
 
@@ -101,6 +107,21 @@ def _series_for_event(ev: Event, da: DriveArrays) -> list[dict]:
             resid = highpass_angle(t, da.steering_angle[sl])
             out.append({"label": f"high-passed angle ({PP_HP_WINDOW_S:.0f}s)", "unit": "°", "data": ds(resid)})
         out.append({"label": "vEgo", "unit": "m/s", "data": ds(da.v[sl])})
+    elif ev.kind == "cf_turnin":
+        if da.desired_curv is not None:
+            out.append({"label": "planned curvature (left+)", "unit": "1/km",
+                        "data": ds(-1000.0 * da.desired_curv[sl])})
+        if da.steering_angle is not None:
+            out.append({"label": "steering angle", "unit": "°", "data": ds(da.steering_angle[sl])})
+        out.append({"label": "vEgo", "unit": "m/s", "data": ds(da.v[sl])})
+    elif ev.kind in ("cf_brake", "cf_launch"):
+        if da.a_target is not None:
+            out.append({"label": "planned accel", "unit": "m/s²", "data": ds(da.a_target[sl])})
+        out.append({"label": "aEgo", "unit": "m/s²", "data": ds(da.a[sl])})
+        out.append({"label": "vEgo", "unit": "m/s", "data": ds(da.v[sl])})
+        if da.d_rel is not None and da.lead_status is not None:
+            d = np.where(da.lead_status[sl], da.d_rel[sl], np.nan)
+            out.append({"label": "lead distance", "unit": "m", "data": ds(d)})
     elif ev.kind == "intent":
         if da.steering_angle is not None:
             out.append({"label": "steering angle", "unit": "°", "data": ds(da.steering_angle[sl])})
@@ -133,6 +154,12 @@ def _event_payload(ev: Event, da: DriveArrays, t_drive0: float) -> dict:
         tag = f"{ev.values.get('side', '')} · {ev.values.get('outcome', '')}"
         if ev.values.get("missed"):
             tag += " · MISSED"
+    elif ev.kind in ("cf_turnin", "cf_brake", "cf_launch"):
+        tag = str(ev.values.get("side", ""))
+        if ev.values.get("never_planned"):
+            tag = (tag + " · NEVER PLANNED").strip(" ·")
+        elif ev.values.get("censored"):
+            tag = (tag + " · plan never crossed (censored)").strip(" ·")
     return {
         "kind": ev.kind,
         "engaged": ev.engaged,
@@ -359,6 +386,118 @@ def _breakdown_tables(breakdowns: dict) -> str:
 <section>
   <h2>Longitudinal breakdowns <span class="muted">same human baseline; mixed-mode events excluded</span></h2>
   {''.join(out)}
+</section>"""
+
+
+def _lagfmt(v, digits=2) -> str:
+    if v is None:
+        return "–"
+    return f"{v:+.{digits}f}"
+
+
+def _counterfactual_section(cf) -> str:
+    if cf is None or not cf.available:
+        why = getattr(cf, "why_unavailable", "") if cf is not None else ""
+        if why:
+            return (f'<section><h2>Plan vs You (counterfactual)</h2>'
+                    f'<p class="muted">Unavailable: {_esc(why)}.</p></section>')
+        return ""
+    parts = []
+
+    # L1 path agreement
+    if cf.path_overall is not None:
+        rows = "".join(
+            f"<tr><td>{b['lo_mph']:.0f}–{b['hi_mph']:.0f} mph</td>"
+            f"<td>{b['rms']:.2f}</td><td>{b['seconds']:.0f}s</td></tr>"
+            for b in cf.path_bins
+        )
+        parts.append(f"""
+<div class="card">
+  <h3>Path agreement</h3>
+  <p class="muted">RMS lateral-accel disagreement between the model's planned curvature and your
+  steering, over your manual driving: <strong>{cf.path_overall:.2f} m/s²</strong>
+  ({cf.path_seconds:.0f} s of data). Lower = the model would have steered like you.</p>
+  <table class="mtable"><thead><tr><th>Speed</th><th>RMS (m/s²)</th><th>Time</th></tr></thead>
+  <tbody>{rows}</tbody></table>
+</div>""")
+
+    # L2 turn-in
+    ts = cf.turn_in_summary()
+    if ts["n"]:
+        side_txt = " · ".join(
+            f"{s}: {v['median']:+.2f} s (n={v['n']})" for s, v in ts["by_side"].items()
+        )
+        parts.append(f"""
+<div class="card">
+  <h3>Counterfactual turn-in <span class="muted">(your intersection turns, blinker &lt; 20 mph)</span></h3>
+  <p>Planned-turn onset vs your steering onset (positive = model later than you):
+  median <strong>{_lagfmt(ts['median_lag'])} s</strong> over n={ts['n_lag']} turns{(' — ' + side_txt) if side_txt else ''}.
+  <strong>Model never planned the turn: {ts['never']}/{ts['n']}</strong>
+  (planned curvature never reached 30% of your peak).</p>
+</div>""")
+
+    # L3 unwind
+    us = cf.unwind_summary()
+    if us:
+        rows = " · ".join(f"{s}: {v['mean']:+.2f} s (n={v['n']})" for s, v in us.items())
+        parts.append(f"""
+<div class="card">
+  <h3>Counterfactual unwind <span class="muted">(your sharp turns)</span></h3>
+  <p>Planned-curvature unwind (to 50% of its peak) vs your actual unwind,
+  positive = model would straighten later: {rows}.</p>
+</div>""")
+
+    # C1 braking
+    bs = cf.braking_summary()
+    if bs["n"] or bs["never"]:
+        parts.append(f"""
+<div class="card">
+  <h3>Counterfactual braking onset <span class="muted">(your stops behind a lead)</span></h3>
+  <p>Planned accel crossing −0.5 m/s² vs yours (positive = model would brake later):
+  median <strong>{_lagfmt(bs['median'])} s</strong>, n={bs['n']}.
+  Plan never reached −0.5: {bs['never']}. Stops without a lead skipped: {bs['skipped_no_lead']}
+  (with cruise unset, the plan only reliably brakes when a lead — or, in experimental mode,
+  the e2e model — constrains it).</p>
+</div>""")
+
+    # C2 launch
+    ls = cf.launch_summary()
+    if ls["n"]:
+        parts.append(f"""
+<div class="card">
+  <h3>Counterfactual launch onset <span class="muted">(your lead pull-aways)</span></h3>
+  <p>Planned accel crossing +0.3 m/s² after the lead moves vs your response
+  (positive = model would launch later): median <strong>{_lagfmt(ls['median'])} s</strong>, n={ls['n']}.</p>
+</div>""")
+
+    # C3 follow opinion
+    if cf.follow_opinion:
+        rows = "".join(
+            f"<tr><td>{_esc(p)}</td><td>{v['driver_median']:.2f} s</td>"
+            f"<td>{v['target']:.2f} s</td><td>{v['seconds']:.0f}s</td></tr>"
+            for p, v in sorted(cf.follow_opinion.items())
+        )
+        parts.append(f"""
+<div class="card">
+  <h3>Follow-gap opinion <span class="muted">(lead-constrained plan samples only)</span></h3>
+  <table class="mtable"><thead><tr><th>Personality</th><th>You follow</th><th>Model wants (target)</th><th>Time</th></tr></thead>
+  <tbody>{rows}</tbody></table>
+  <p class="muted">Restricted to samples where longitudinalPlanSource is a lead source — in
+  experimental mode the e2e planner dominates and doesn't pursue the personality target.</p>
+</div>""")
+    elif cf.follow_opinion_note:
+        parts.append(f'<div class="card"><h3>Follow-gap opinion</h3>'
+                     f'<p class="muted">{_esc(cf.follow_opinion_note)}.</p></div>')
+
+    if not parts:
+        return ""
+    return f"""
+<section>
+  <h2>Plan vs You (counterfactual)</h2>
+  <div class="warn">Computed from the model's live plan during YOUR driving (it keeps planning
+  while disengaged). Timing comparisons are robust; magnitudes are indicative only — the plan is
+  conditioned on the situation you created. These numbers are NOT part of the grades above.</div>
+  {''.join(parts)}
 </section>"""
 
 
@@ -614,6 +753,8 @@ def render_report(analysis, out_path: str | Path) -> Path:
 {''.join(group_sections)}
 
 {_breakdown_tables(grades.breakdowns)}
+
+{_counterfactual_section(getattr(analysis, "counterfactual", None))}
 
 <section>
   <h2>Distributions</h2>

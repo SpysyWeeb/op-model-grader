@@ -118,6 +118,9 @@ _SPECS = {
     "leadALeadK": ("radarState", ["leadOne.aLeadK"], _FLOAT),
     # longitudinalPlan @ ~20 Hz (nice-to-have)
     "aTarget": ("longitudinalPlan", ["aTarget"], _FLOAT),
+    "planSource": ("longitudinalPlan", ["longitudinalPlanSource.raw"], _INT),
+    # modelV2 @ ~20 Hz: the model's live plan (runs even while disengaged)
+    "desiredCurvature": ("modelV2", ["action.desiredCurvature"], _FLOAT),
     # yaw rate: livePose (modern) / liveLocationKalman (old)
     "yawRate": ("livePose", ["angularVelocityDevice.z"], _FLOAT),
     "yawRateLLK": (

@@ -42,6 +42,7 @@ class Analysis:
     t_follow_targets: dict = field(default_factory=dict)
     bucket_times: dict = field(default_factory=dict)  # bucket -> model-long seconds
     model_id: dict | None = None
+    counterfactual: object | None = None  # counterfactual.Counterfactual
     grades: GradeReport | None = None
 
 
@@ -163,9 +164,11 @@ def analyze(per_drive: list[PerDrive], t_follow_targets: dict | None = None) -> 
     an = Analysis(per_drive=per_drive)
     an.t_follow_targets = dict(t_follow_targets or DEFAULT_T_FOLLOW)
     by_name = {}
+    vms: dict[str, object] = {}
     for drive, seg, da, events in per_drive:
         by_name[drive.name] = events
         vm = vehicle_model_from_params(drive.meta.vm_params)
+        vms[drive.name] = vm
         turns = detect_turn_episodes(drive.name, seg, da)
         intents = detect_intent_windows(drive.name, seg, da, vm)
         an.turns += turns
@@ -183,6 +186,16 @@ def analyze(per_drive: list[PerDrive], t_follow_targets: dict | None = None) -> 
         for ev in an.pingpong.worst_windows:
             if ev.drive in by_name:
                 by_name[ev.drive].append(ev)
+
+    # counterfactual "Plan vs You" (manual time only; unscored)
+    from .counterfactual import analyze_counterfactual
+
+    an.counterfactual, cf_events = analyze_counterfactual(
+        per_drive, an.turns, an.intents, an.t_follow_targets, vms
+    )
+    for ev in cf_events:
+        if ev.drive in by_name:
+            by_name[ev.drive].append(ev)
 
     an.samples, an.bucket_samples = collect_samples(per_drive)
     add_turn_samples(an.samples, an.turns, an.intents)
