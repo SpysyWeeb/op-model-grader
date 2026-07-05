@@ -104,6 +104,10 @@ def _series_for_event(ev: Event, da: DriveArrays) -> list[dict]:
         out.append({"label": "vEgo", "unit": "m/s", "data": ds(da.v[sl])})
         if da.steering_pressed is not None:
             out.append({"label": "steeringPressed", "unit": "", "data": ds(da.steering_pressed[sl].astype(float))})
+        if ev.engaged and da.torque_output is not None:
+            out.append({"label": "commanded torque", "unit": "-1..1", "data": ds(da.torque_output[sl])})
+        if da.driver_torque is not None:
+            out.append({"label": "driver torque", "unit": "raw", "data": ds(da.driver_torque[sl])})
     elif ev.kind == "pingpong":
         if da.steering_angle is not None:
             resid = highpass_angle(t, da.steering_angle[sl])
@@ -164,6 +168,10 @@ def _event_payload(ev: Event, da: DriveArrays, t_drive0: float) -> dict:
         tag = ("sharp " if ev.values.get("sharp") else "curve ") + str(ev.values.get("side", ""))
         if ev.values.get("rescued"):
             tag += " · rescued"
+        if ev.engaged and ev.values.get("initiator") and ev.values["initiator"] != "unknown":
+            tag += f" · {ev.values['initiator']}-led"
+        if ev.values.get("divergence_deg") is not None:
+            tag += f" · resisted {ev.values['divergence_deg']:.0f}°"
     elif ev.kind == "intent":
         tag = f"{ev.values.get('side', '')} · {ev.values.get('outcome', '')}"
         if ev.values.get("missed"):
@@ -662,20 +670,29 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "turns build the baseline it's compared against.",
     ),
     "Turn-In Timing": (
-        "Blinker-free: every sharp low-speed turn is checked directly, signaled or "
-        "not, the same turn episodes Turn Execution uses. Cmd-vs-actual onset lead "
+        "Blinker-free: every engaged turn is checked directly, sharp or gentler, "
+        "signaled or not, the same turn episodes Turn Execution uses. Cmd-vs-actual "
+        "divergence measures how far the model's own commanded angle ended up from "
+        "the actual angle while you were genuinely fighting it (your torque pushing "
+        "the opposite way from the model's, sustained at least 0.3 s — not just a "
+        "hand resting on the wheel) — a continuously-replanning model rarely "
+        "'refuses' a turn outright, so what matters is how far reality drifted from "
+        "its plan during a real tug-of-war, not whether it technically commanded "
+        "some path. Turns with no such resistance score nothing (not a zero) — "
+        "there was no disagreement to measure. Cmd-vs-actual onset lead separately "
         "compares when the model's own commanded path first called for the turn "
         "against when the wheel actually got there — positive means the model "
-        "committed after the fact; missed turn-ins are engaged sharp turns where the "
-        "model's own plan never called for the turn at all, even though the wheel "
-        "turned sharply (a different, blinker-based 'Blinker turn intents' table "
-        "elsewhere in this report only covers turns you signaled below 20 mph — "
-        "that's a separate, unscored diagnostic, not this grade).",
-        "Any low-speed sharp turn counts, manual or model-driven, signaled or not — "
-        "more of them sharpens this grade. Contaminated turns (you pressing the "
-        "wheel before the peak) still count toward missed turn-ins — that's often "
-        "exactly why you had to press it — but are excluded from the onset-lead "
-        "timing itself, same as Turn Execution's unwind metrics.",
+        "committed after the fact. The breakdown table below shows who moved first "
+        "(model/driver/lag) and whether the model was already at its torque limit "
+        "during the resistance — shown for context only, it never changes the "
+        "score (a different, blinker-based 'Blinker turn intents' table elsewhere "
+        "in this report only covers turns you signaled below 20 mph — that's a "
+        "separate, unscored diagnostic, not this grade).",
+        "Any turn counts, manual or model-driven, sharp or gentle, signaled or not "
+        "— more of them sharpens this grade. This one specifically wants moments "
+        "you actually resisted the model's steering (not just touched the wheel) "
+        "— if you never push back against a turn the model gets wrong, there's "
+        "nothing here to measure it.",
     ),
     "General Smoothness": (
         "Overall steering comfort at speed: RMS lateral jerk is side-to-side "
@@ -732,6 +749,49 @@ def _speed_disagreement_extras(cat: CategoryResult) -> str:
     return "".join(parts)
 
 
+_INITIATOR_LABELS = {
+    "model": "Model-led (no resistance)",
+    "driver": "Driver-led",
+    "lag": "Neither led (control lag)",
+    "unknown": "Unknown (no cmd source)",
+}
+
+
+def _turn_in_breakdown_table(cat: CategoryResult) -> str:
+    """Diagnostic-only texture for Turn-In Timing: who moved first, and (for
+    the episodes that DID have a scored conflict) the median divergence and
+    torque-ceiling context. Never affects the score above."""
+    bd = cat.extra.get("breakdown") if cat.extra else None
+    if not bd:
+        return ""
+    rows = []
+    for key in ("model", "driver", "lag", "unknown"):
+        b = bd.get(key)
+        if not b or not b["n"]:
+            continue
+        ceiling = ""
+        if b["n_conflict"]:
+            ceiling = (
+                f'{b["ceiling_true"]} maxed out · {b["ceiling_false"]} not maxed'
+                + (f' · {b["ceiling_unknown"]} unknown' if b["ceiling_unknown"] else "")
+            )
+        rows.append(
+            f"<tr><td>{_esc(_INITIATOR_LABELS[key])}</td><td>{b['n']}</td>"
+            f"<td>{b['n_conflict']}</td><td>{_fmt(b['median_divergence'], 0)}</td>"
+            f"<td>{_esc(ceiling)}</td></tr>"
+        )
+    if not rows:
+        return ""
+    return f"""
+  <table class="mtable">
+    <thead><tr><th>Who moved first</th><th>Episodes</th><th>Resisted</th>
+    <th>Median divergence (°)</th><th>Torque during resistance</th></tr></thead>
+    <tbody>{"".join(rows)}</tbody>
+  </table>
+  <p class="muted">"Who moved first" and "torque during resistance" are context only — the score above
+  comes entirely from the divergence column, on episodes where you genuinely resisted.</p>"""
+
+
 def _category_card(cat: CategoryResult) -> str:
     letter = cat.letter or "–"
     score_txt = f"{cat.score:.0f}" if cat.score is not None else "no data"
@@ -754,6 +814,8 @@ def _category_card(cat: CategoryResult) -> str:
             )
         if cat.name == "Speed Disagreement":
             body += _speed_disagreement_extras(cat)
+        if cat.name == "Turn-In Timing":
+            body += _turn_in_breakdown_table(cat)
     help_html = ""
     if cat.name in CATEGORY_HELP:
         what, data = CATEGORY_HELP[cat.name]
@@ -1047,14 +1109,27 @@ def render_report(analysis, out_path: str | Path) -> Path:
   sharp turn = peak ≥ 90° with onset speed &lt; 15 mph; positive angle = left (ISO). Commanded angle =
   VehicleModel(carParams).get_steer_from_curvature(−actuators.curvature, vEgo). Ping-pong = high-passed
   steering angle (minus centered 2 s mean), per speed bin, standstill and steeringPressed excluded.
-  <strong>Turn-In Timing is blinker-free</strong>: it scores the same turn episodes as Turn Execution
-  (every sharp turn ≥ 90°, signaled or not) — cmd-onset lead = the model's own commanded-angle 20°
-  crossing minus the actual angle's, missed turn-in = the model's commanded angle never reaching 20°
-  even though the wheel did. <strong>Turn intents</strong> (a separate, unscored diagnostic elsewhere in
-  this report, NOT used for Turn-In Timing's grade): blinker on below 20 mph opens a window (blinker-on
-  + 20 s or blinker-off + 5 s); |net heading| ≥ 45° = intersection turn, &lt; 20° = lane change, else
-  ambiguous — this population still feeds the separate Plan-vs-You counterfactual turn-in section, whose
-  definition of "missed"/"never planned" is blinker-gated and independent of the metric above.</p>
+  <strong>Turn-In Timing is blinker-free</strong>: it scores the same turn episodes as Turn Execution,
+  every engaged turn regardless of band — cmd-onset lead = the model's own commanded-angle 20° crossing
+  minus the actual angle's. <strong>Resisted cmd-vs-actual divergence</strong> replaces a torque-ceiling
+  gate: a conflict window opens where steeringPressed is true AND your steering torque opposes the
+  model's own commanded torque (torqueState.output; falls back to opposing actual-vs-commanded angle
+  signs when either torque channel is unavailable), sustained ≥ 0.3 s to filter out an incidental hand on
+  the wheel. The metric is the peak |actual − commanded| angle during that window; episodes with no such
+  window score nothing at all, not a zero. Scored on absolute anchors 15°/75°/300° → 100/50/0, set from
+  the real divergence distribution across two Palisade routes (35 conflict episodes out of 46 engaged
+  turns: median ≈ 79°, p90 ≈ 337°, max 823° on one genuine multi-second tug-of-war) so the scale
+  distinguishes a little push-back from a full fight rather than being picked in a vacuum. Whether the
+  model was already at its torque ceiling during the resistance, and who moved first (model/driver/lag),
+  are shown as unscored context in the category's breakdown table — never a scoring gate. Note:
+  controlsState.lateralControlState.torqueState.saturated was False for every sample on both real
+  routes tested, so ceiling detection is done by thresholding |torque_output| ourselves (CEILING_FRAC =
+  0.92) rather than trusting that flag. <strong>Turn intents</strong> (a separate, unscored diagnostic
+  elsewhere in this report, NOT used for Turn-In Timing's grade): blinker on below 20 mph opens a window
+  (blinker-on + 20 s or blinker-off + 5 s); |net heading| ≥ 45° = intersection turn, &lt; 20° = lane
+  change, else ambiguous — this population still feeds the separate Plan-vs-You counterfactual turn-in
+  section, whose definition of "missed"/"never planned" is blinker-gated and independent of the metric
+  above.</p>
   <p class="muted">op-model-grader v{_esc(__version__)} · charts by <a href="https://github.com/leeoniya/uPlot">uPlot</a> (MIT, vendored)</p>
 </footer>
 </div>
