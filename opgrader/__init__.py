@@ -1,3 +1,3 @@
 """op-model-grader: grade openpilot's driving against your own manual driving."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
