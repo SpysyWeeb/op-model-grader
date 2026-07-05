@@ -54,6 +54,22 @@ def save_jwt(token: str) -> None:
     except (OSError, json.JSONDecodeError):
         pass
     data["access_token"] = token
+    _write_auth(data)
+
+
+def clear_jwt() -> None:
+    """Remove access_token from ~/.comma/auth.json, keeping any other keys."""
+    try:
+        data = json.loads(AUTH_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict) or "access_token" not in data:
+        return
+    del data["access_token"]
+    _write_auth(data)
+
+
+def _write_auth(data: dict) -> None:
     AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = AUTH_FILE.with_suffix(".json.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

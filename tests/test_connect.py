@@ -210,3 +210,16 @@ def test_run_grade_job_demo_route(tmp_path, monkeypatch):
     report = Path(s["report"])
     assert report.is_file() and report.stat().st_size > 100_000
     assert "decoding" in phases and "grading" in phases
+
+
+def test_clear_jwt_removes_token_keeps_other_keys(tmp_path, monkeypatch):
+    f = tmp_path / "auth.json"
+    f.write_text(json.dumps({"access_token": "x" * 30, "github_key": "keepme"}))
+    monkeypatch.setattr(connect, "AUTH_FILE", f)
+    connect.clear_jwt()
+    data = json.loads(f.read_text())
+    assert "access_token" not in data
+    assert data["github_key"] == "keepme"
+    assert connect.read_jwt() is None
+    connect.clear_jwt()  # signing out twice is a no-op, not an error
+    assert json.loads(f.read_text()) == {"github_key": "keepme"}

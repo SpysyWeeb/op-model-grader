@@ -94,6 +94,7 @@ class App:
         self.auth_label.pack(side="left", padx=8, pady=6)
         self.token_entry = ttk.Entry(self.auth_frame, width=42, show="*")
         self.token_save = ttk.Button(self.auth_frame, text="Save token", command=self._save_token)
+        self.signout_btn = ttk.Button(self.auth_frame, text="Sign out", command=self._sign_out)
         self.token_help = ttk.Button(
             self.auth_frame, text="Get a token (jwt.comma.ai)",
             command=lambda: webbrowser.open("https://jwt.comma.ai"),
@@ -195,14 +196,34 @@ class App:
             self.token_entry.pack_forget()
             self.token_save.pack_forget()
             self.token_help.pack_forget()
+            self.signout_btn.pack(side="right", padx=6, pady=4)
             self._load_devices()
         else:
             self.auth_label.config(
                 text="paste a comma JWT to browse your drives (local folders work without one):"
             )
+            self.signout_btn.pack_forget()
             self.token_help.pack(side="right", padx=6, pady=4)
             self.token_save.pack(side="right", padx=6, pady=4)
             self.token_entry.pack(side="right", padx=6, pady=4, fill="x", expand=True)
+
+    def _sign_out(self):
+        if not messagebox.askyesno(
+            "Sign out",
+            "Remove the saved token from ~/.comma/auth.json?\n"
+            "You'll need a fresh token from jwt.comma.ai to sign back in.",
+        ):
+            return
+        C.clear_jwt()
+        self.jwt = None
+        self.dongles = []
+        self.routes = []
+        self.device_box["values"] = []
+        self.device_var.set("")
+        self.tree.delete(*self.tree.get_children())
+        self.routes_msg.config(text="")
+        self.token_entry.delete(0, "end")
+        self._on_auth_checked(None, None)
 
     def _save_token(self):
         token = self.token_entry.get().strip()
