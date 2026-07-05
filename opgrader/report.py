@@ -253,17 +253,36 @@ def _svg_hist(model_vals: list[float], driver_vals: list[float], title: str, uni
 # ------------------------------------------------------------------- pieces
 
 
+def _driver_cell(m: MetricResult) -> str:
+    """'You' column: the combined (this-drive + pooled-profile) aggregate,
+    with provenance when a driver profile actually contributed something --
+    invisible when it didn't, so a non-pooled or --no-profile run looks
+    exactly like it always has."""
+    val = _fmt(m.driver_agg)
+    if m.n_pooled <= 0:
+        return val
+    extra = f'<span class="muted"> (n={m.n_this_drive} this drive + {m.n_pooled} pooled = {m.n_driver})</span>'
+    if (
+        m.same_drive_agg is not None
+        and m.driver_agg is not None
+        and abs(m.same_drive_agg - m.driver_agg) > 1e-9
+    ):
+        extra += f'<span class="muted"> · this drive alone: {_fmt(m.same_drive_agg)}</span>'
+    return val + extra
+
+
 def _metric_rows(metrics: list[MetricResult]) -> str:
     rows = []
     for m in metrics:
         d = m.definition
+        you = _driver_cell(m)
         if d.scorer == "none":
             note = d.note or "diagnostic"
             if m.n_model == 0 and m.n_driver == 0:
                 note = "no data"
             rows.append(
                 f'<tr class="insuff"><td>{_esc(d.label)}</td>'
-                f"<td>{_fmt(m.model_agg)}</td><td>{_fmt(m.driver_agg)}</td>"
+                f"<td>{_fmt(m.model_agg)}</td><td>{you}</td>"
                 f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
             )
         elif m.score is None:
@@ -271,14 +290,14 @@ def _metric_rows(metrics: list[MetricResult]) -> str:
             note = f"insufficient data (model n={m.n_model}, you n={m.n_driver}, need ≥3{need_d})"
             rows.append(
                 f'<tr class="insuff"><td>{_esc(d.label)}</td>'
-                f"<td>{_fmt(m.model_agg)}</td><td>{_fmt(m.driver_agg)}</td>"
+                f"<td>{_fmt(m.model_agg)}</td><td>{you}</td>"
                 f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
             )
         else:
             star = "*" if (d.scorer == "abs" or (d.scorer == "ratio_or_abs" and (m.n_driver < 3 or (m.driver_agg or 0) < (d.abs_when_driver_below or 0)))) else ""
             rows.append(
                 f"<tr><td>{_esc(d.label)}{star}</td>"
-                f"<td>{_fmt(m.model_agg)}</td><td>{_fmt(m.driver_agg)}</td>"
+                f"<td>{_fmt(m.model_agg)}</td><td>{you}</td>"
                 f"<td>{_esc(d.unit)}</td><td>{m.score:.0f}</td></tr>"
             )
     return "".join(rows)
@@ -293,11 +312,16 @@ def _pingpong_card(cat: CategoryResult) -> str:
         rows = []
         for b in bs:
             score = f"{b.score:.0f}" if b.score is not None else "–"
+            manual_rms = _fmt(b.manual_rms)
+            manual_rev = _fmt(b.manual_rev, 1)
+            if b.pooled_n > 0:
+                manual_rms += f'<span class="muted"> ({_fmt(b.pooled_manual_rms)} w/ +{b.pooled_n} pooled)</span>'
+                manual_rev += f'<span class="muted"> ({_fmt(b.pooled_manual_rev, 1)} pooled)</span>'
             rows.append(
                 f"<tr><td>{b.lo_mph:.0f}–{('' if b.hi_mph < 150 else '+')}{'' if b.hi_mph >= 150 else f'{b.hi_mph:.0f}'} mph</td>"
                 f"<td>{b.engaged_s:.0f}s / {b.manual_s:.0f}s</td>"
-                f"<td>{_fmt(b.engaged_rms)} / {_fmt(b.manual_rms)}</td>"
-                f"<td>{_fmt(b.engaged_rev, 1)} / {_fmt(b.manual_rev, 1)}</td>"
+                f"<td>{_fmt(b.engaged_rms)} / {manual_rms}</td>"
+                f"<td>{_fmt(b.engaged_rev, 1)} / {manual_rev}</td>"
                 f"<td>{score}</td></tr>"
             )
         return "".join(rows)
@@ -327,7 +351,9 @@ def _pingpong_card(cat: CategoryResult) -> str:
   {sub_html}
   <p class="muted">Oscillation = steering angle minus its centered 2 s moving average; reversals
   counted when the swing between extrema exceeds 3°. A bin is scored only with ≥30 s on each side;
-  category score is the engaged-time-weighted mean of bin scores.</p>"""
+  category score is the engaged-time-weighted mean of bin scores. "w/ +N pooled" means the manual
+  baseline for that bin also draws on N other routes from your driver profile (model/engaged data
+  is never pooled, only your own driving).</p>"""
 
 
 def _breakdown_tables(breakdowns: dict) -> str:
@@ -777,6 +803,9 @@ def _header_facts(drives, buckets, analysis=None) -> list[tuple[str, str]]:
             if mid.get("provenance") not in (None, "unknown"):
                 label += f" — {mid['provenance']}"
             facts.append(("Driving model", label))
+        psum = getattr(analysis, "profile_summary", None)
+        if psum is not None:
+            facts.append(("Driver profile", "; ".join(psum.lines())))
     if any(d.meta.experimental_mode for d in drives) and (
         analysis is None or "experimental" not in (getattr(analysis, "bucket_times", {}) or {})
     ):
@@ -971,7 +1000,12 @@ def render_report(analysis, out_path: str | Path) -> Path:
   Letters: ≥93 A, ≥85 A−, ≥78 B+, ≥70 B, ≥60 C, ≥50 D, else F. Ratio metrics need ≥3 events per side.
   Longitudinal weights: Smoothness 0.25, Following 0.18, Stopping 0.17, Launch 0.15, Responsiveness 0.10, Speed Disagreement 0.15.
   Lateral weights: Ping-Pong 0.40, Turn Execution 0.30, Turn-In Timing 0.20, General Smoothness 0.10.
-  Overall = ½ Longitudinal + ½ Lateral; empty categories/groups are dropped and weights renormalized.</p>
+  Overall = ½ Longitudinal + ½ Lateral; empty categories/groups are dropped and weights renormalized.
+  A local <strong>driver profile</strong> (~/.local/share/opgrader/profile.json by default) accumulates
+  your manual-driving samples across every route you grade and blends them into "You" values above —
+  the model side is never pooled, only your own driving, so a metric's combined n (shown in its "You"
+  cell when a profile contributed) is what gates the ≥3-events rule. Skip it for one run with
+  --no-profile; inspect or delete it with --clear-profile.</p>
   <p><strong>Longitudinal definitions.</strong> Jerk = d(aEgo)/dt after a centered 0.3 s moving average.
   Stops: from last vEgo ≥ 8 m/s to standstill (&lt; 0.3 m/s for ≥ 0.5 s, ≤ 45 s).
   Launch: standstill → 5 m/s (must reach 3 m/s within 10 s of first motion).
