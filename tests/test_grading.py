@@ -63,6 +63,7 @@ def test_score_absolute():
 
 
 def test_letters():
+    assert letter(100.0) == "S"
     assert letter(95) == "A"
     assert letter(85) == "A-"
     assert letter(78) == "B+"
@@ -70,6 +71,15 @@ def test_letters():
     assert letter(60) == "C"
     assert letter(50) == "D"
     assert letter(49.9) == "F"
+
+
+def test_s_grade_survives_float_summation_noise_but_not_real_near_perfect():
+    # a weighted mean of several exact-100.0 scores can land a hair under
+    # 100.0 in double precision -- S must still trigger. A genuinely
+    # non-perfect score close to 100 (a real, slightly-off ratio) must not.
+    almost_by_fp_noise = sum(100.0 * w for w in (0.30, 0.20, 0.20, 0.17, 0.13))
+    assert letter(almost_by_fp_noise) == "S"
+    assert letter(99.97) != "S"  # e.g. score_ratio(1.0006, 1.0) -- really not perfect
 
 
 def test_insufficient_data_needs_three_per_side():

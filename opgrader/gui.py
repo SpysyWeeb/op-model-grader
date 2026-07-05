@@ -8,6 +8,7 @@ widgets are only touched from the Tk main loop (via root.after).
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import time
 import webbrowser
@@ -51,6 +52,9 @@ class App:
         self._bg(self._check_auth, self._on_auth_checked)
         self._refresh_reports()
         self._refresh_profile()
+        # Catch-all: absorb any other late reflow (theme/font metrics
+        # settling, etc.) beyond the two async paths already re-fit above.
+        root.after(200, self._fit_window)
 
     # ------------------------------------------------------------ threading
     # Worker threads never touch Tk directly: they enqueue callbacks that the
@@ -249,11 +253,17 @@ class App:
             self.local_frame.pack(fill="x", before=self.grade_frame, **self._pad)
         self._fit_window()
 
+    # Small cushion against platform/theme border-metric differences (window
+    # manager decorations, ttk theme padding) that reqwidth/reqheight don't
+    # always fully account for -- cheap insurance against a content row
+    # landing a few pixels short of visible.
+    _FIT_MARGIN = 16
+
     def _fit_window(self):
         """Size the window so the whole UI fits without manual resizing."""
         self.root.update_idletasks()
-        w = max(880, self.root.winfo_reqwidth())
-        h = self.root.winfo_reqheight()
+        w = max(880, self.root.winfo_reqwidth() + self._FIT_MARGIN)
+        h = self.root.winfo_reqheight() + self._FIT_MARGIN
         self.root.geometry(f"{w}x{h}")
         self.root.minsize(w, h)
 
@@ -286,6 +296,7 @@ class App:
             self.token_help.pack(side="right", padx=6, pady=4)
             self.token_save.pack(side="right", padx=6, pady=4)
             self.token_entry.pack(side="right", padx=6, pady=4, fill="x", expand=True)
+        self._fit_window()  # auth-row content just changed shape; re-settle
 
     def _sign_out(self):
         if not messagebox.askyesno(
@@ -656,6 +667,7 @@ class App:
                 self.profile_label.config(text="no profile yet")
             else:
                 self.profile_label.config(text="; ".join(summary.lines()))
+            self._fit_window()  # label text just changed length
 
         self._bg(load, done)
 
@@ -678,7 +690,29 @@ class App:
         self._refresh_profile()
 
 
+def _set_windows_dpi_awareness() -> None:
+    """Without this, Tk on Windows reports widget sizes in unscaled units
+    while the OS renders everything at the real (scaled) pixel size on any
+    display above 100% scaling -- very common on Windows laptops. The window
+    then gets fit too small for what's actually on screen, clipping the
+    bottom row until the user manually resizes. Must run before Tk() exists.
+    Best-effort: no-op (and harmless) on anything but Windows.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    import ctypes
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # per-monitor DPI aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # older Windows fallback
+        except Exception:
+            pass
+
+
 def run() -> None:
+    _set_windows_dpi_awareness()
     root = tk.Tk()
     try:
         ttk.Style().theme_use("clam")

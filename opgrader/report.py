@@ -16,7 +16,7 @@ import numpy as np
 
 from . import __version__
 from .events import DriveArrays, Event
-from .grading import CategoryResult, GradeReport, MetricResult
+from .grading import CategoryResult, GradeReport, MetricResult, S_CUTOFF
 from .metrics import derivative
 from .lateral import PP_HP_WINDOW_S, highpass_angle
 
@@ -580,6 +580,8 @@ def _counterfactual_section(cf) -> str:
 def _grade_class(score) -> str:
     if score is None:
         return "gnone"
+    if score >= S_CUTOFF:
+        return "ggold"
     if score >= 78:
         return "ggood"
     if score >= 60:
@@ -1073,13 +1075,13 @@ _CSS = """
   --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
   --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,0.10);
   --model:#2a78d6; --driver:#1baf7a;
-  --good:#0ca30c; --warnc:#fab219; --bad:#d03b3b;
+  --good:#0ca30c; --warnc:#fab219; --bad:#d03b3b; --gold:#a8790a;
 }
 @media (prefers-color-scheme: dark){
   :root{
     --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
     --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10);
-    --model:#3987e5; --driver:#199e70;
+    --model:#3987e5; --driver:#199e70; --gold:#f0c030;
   }
 }
 *{box-sizing:border-box}
@@ -1107,9 +1109,11 @@ a{color:var(--model)}
 .gheroes{display:flex;gap:20px;margin-top:14px;flex-wrap:wrap}
 .ghero{flex:1;min-width:200px;text-align:center;border:1px solid var(--border);
   border-radius:12px;padding:14px}
+.ghero.ggold{border-color:var(--gold);box-shadow:0 0 0 1px var(--gold), 0 0 16px -4px var(--gold)}
 .gletter{font-size:3.6rem;font-weight:700;line-height:1.1}
 .ggood .gletter{color:var(--good)} .gmid .gletter{color:var(--warnc)}
 .gbad .gletter{color:var(--bad)} .gnone .gletter{color:var(--muted)}
+.ggold .gletter{color:var(--gold)}
 .gname{font-weight:600;margin-top:4px}
 .gscore{color:var(--muted);font-size:.9em}
 .herohint{color:var(--muted);font-size:.85em;margin-top:12px}
@@ -1117,10 +1121,12 @@ a{color:var(--model)}
   border:1px solid var(--model);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:.9em}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;overflow-x:auto}
+.card.ggold{border-color:var(--gold)}
 .cathead{display:flex;justify-content:space-between;align-items:baseline}
 .catgrade .letter{font-size:1.5rem;font-weight:700;margin-right:8px}
 .ggood .catgrade .letter{color:var(--good)} .gmid .catgrade .letter{color:var(--warnc)}
 .gbad .catgrade .letter{color:var(--bad)} .gnone .catgrade .letter{color:var(--muted)}
+.ggold .catgrade .letter{color:var(--gold)}
 .catgrade .score{color:var(--muted);font-size:.9em}
 .catweight{color:var(--muted);font-size:.8em;margin:2px 0 8px}
 table{border-collapse:collapse;width:100%;font-size:.86em}

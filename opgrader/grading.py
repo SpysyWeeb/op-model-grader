@@ -65,7 +65,13 @@ CATEGORY_GROUPS = {
     },
 }
 
-LETTER_BINS = [(93, "A"), (85, "A-"), (78, "B+"), (70, "B"), (60, "C"), (50, "D")]
+# Scores are mathematically capped at 100.0 (score_ratio/score_absolute never
+# exceed it), so S_CUTOFF only needs to absorb float summation noise from
+# weighted averages -- not distinguish real near-100 scores, which differ
+# from a true 100 by far more than 1e-6.
+S_CUTOFF = 100.0 - 1e-6
+
+LETTER_BINS = [(S_CUTOFF, "S"), (93, "A"), (85, "A-"), (78, "B+"), (70, "B"), (60, "C"), (50, "D")]
 
 
 def letter(score: float) -> str:
