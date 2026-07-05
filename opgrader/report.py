@@ -1054,7 +1054,8 @@ function mkChart(el, title, t, ys, color, unit){
   div.className = 'chart';
   const cap = document.createElement('div');
   cap.className = 'charttitle';
-  cap.textContent = title + (unit ? ' (' + unit + ')' : '');
+  const baseTitle = title + (unit ? ' (' + unit + ')' : '');
+  cap.textContent = baseTitle;
   el.appendChild(cap); el.appendChild(div);
   const w = Math.min(el.clientWidth || 900, 980);
   const opts = {
@@ -1070,6 +1071,18 @@ function mkChart(el, title, t, ys, color, unit){
       {label: title, stroke: color, width: 2, points: {show: false}},
     ],
     legend: {show: false},
+    hooks: {
+      // live readout: hovering any (cursor-synced) chart shows each chart's
+      // value at that time in its title line
+      setCursor: [u => {
+        const i = u.cursor.idx;
+        if (i == null || i < 0 || u.data[0][i] == null) { cap.textContent = baseTitle; return; }
+        const v = u.data[1][i];
+        cap.innerHTML = baseTitle + ' — <b>' +
+          (v == null ? '–' : (+v).toFixed(2)) + (unit ? ' ' + unit : '') +
+          '</b> @ ' + (+u.data[0][i]).toFixed(1) + ' s';
+      }],
+    },
   };
   charts.push(new uPlot(opts, [t, ys], div));
 }
