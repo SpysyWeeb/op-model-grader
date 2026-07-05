@@ -1,8 +1,8 @@
 """Score the model against the driver and assign letter grades.
 
 Two top-level groups, each with its own headline grade:
-- Longitudinal: Smoothness 0.30, Following 0.20, Stopping 0.20,
-  Launch 0.17, Responsiveness 0.13
+- Longitudinal: Smoothness 0.25, Following 0.18, Stopping 0.17,
+  Launch 0.15, Responsiveness 0.10, Speed Disagreement 0.15
 - Lateral: Ping-Pong 0.40, Turn Execution 0.30, Turn-In Timing 0.20,
   General Smoothness 0.10
 Overall = 0.5*Longitudinal + 0.5*Lateral (renormalized if a group has no data).
@@ -50,11 +50,12 @@ ALL_BUCKETS = MODE_BUCKETS + PERSONALITY_BUCKETS
 
 CATEGORY_GROUPS = {
     "Longitudinal": {
-        "Smoothness": 0.30,
-        "Following": 0.20,
-        "Stopping": 0.20,
-        "Launch": 0.17,
-        "Responsiveness": 0.13,
+        "Smoothness": 0.25,
+        "Following": 0.18,
+        "Stopping": 0.17,
+        "Launch": 0.15,
+        "Responsiveness": 0.10,
+        "Speed Disagreement": 0.15,
     },
     "Lateral": {
         "Ping-Pong": 0.40,
@@ -111,6 +112,8 @@ METRICS: list[MetricDef] = [
     # ---- Longitudinal / Responsiveness (per stimulus)
     MetricDef("lead_decel_latency", "Lead-decel response latency", "Responsiveness", "s", eps=0.1),
     MetricDef("pullaway_latency", "Lead pull-away latency", "Responsiveness", "s", eps=0.1),
+    # (Speed Disagreement rows are duration-weighted global aggregates built
+    #  in speed_disagreement_results, adherence-style, not METRICS entries)
     # ---- Lateral / Turn Execution (per turn episode)
     MetricDef(
         "s_overshoot", "S-curve overshoot after unwind (sharp turns)", "Turn Execution", "% of peak",
@@ -371,6 +374,8 @@ def collect_samples(
 
         # ---- longitudinal event-based
         for ev in events:
+            if ev.kind == "gas_override":
+                continue  # sampled in speed_disagreement.py, not here
             side = "model" if ev.engaged else "driver"
             if ev.engaged and ev.has_override:
                 continue
@@ -522,8 +527,101 @@ def adherence_results(
     return out
 
 
+# ------------------------------------------------- speed disagreement rows
+
+SD_MIN_SECONDS = 120.0  # model-long time needed to score rate / %-time
+SD_MIN_MAG_EPISODES = 3  # episodes with plan data needed to score magnitude
+SD_RATE_ANCHORS = (0.0, 4.0, 8.0)  # episodes / 10 min at score 100 / 50 / 0
+SD_PCT_ANCHORS = (0.0, 10.0, 25.0)  # % of model-long time
+SD_MAG_ANCHORS = (0.2, 1.0, 2.0)  # m/s^2 of extra demanded accel
+
+
+def _sd_row(
+    key: str, label: str, unit: str, value: float | None,
+    anchors: tuple[float, float, float] | None, enough: bool, note: str,
+    n_vals: int = 1,
+) -> MetricResult:
+    d = MetricDef(
+        key=key, label=label, category="Speed Disagreement", unit=unit,
+        scorer="abs" if (enough and anchors is not None) else "none",
+        abs_anchors=anchors, needs_driver=False, note=note,
+    )
+    r = MetricResult(d, [float(value)] * n_vals if value is not None else [], [])
+    r.model_agg = value
+    if enough and anchors is not None and value is not None:
+        r.score = score_absolute(value, anchors)
+    return r
+
+
+def speed_disagreement_results(sd) -> list[MetricResult]:
+    """Speed Disagreement rows from duration-weighted global aggregates.
+
+    There is no human baseline for overriding yourself, so rate/%/magnitude
+    are scored on documented absolute anchors; instead of the usual n>=3
+    events per side, rate and %-time gate on SD_MIN_SECONDS of model-long
+    time (a rate of zero over plenty of time is a meaningful 100)."""
+    secs = sd.model_long_seconds
+    enough_time = sd.have_gas and sd.overall_rate is not None and secs >= SD_MIN_SECONDS
+    time_note = f"{len(sd.episodes)} episodes over {secs / 60:.1f} min of model-long time"
+    if not sd.have_gas:
+        time_note = "gasPressed channel missing in these logs"
+    elif not enough_time:
+        time_note += f" — need {SD_MIN_SECONDS:.0f} s of model-long time to score"
+    rows = [
+        _sd_row("gas_override_rate", "Gas-override episodes", "/10min",
+                sd.overall_rate, SD_RATE_ANCHORS, enough_time, time_note),
+        _sd_row("gas_override_pct", "Gas-override time", "%",
+                sd.overall_pct, SD_PCT_ANCHORS, enough_time, time_note),
+    ]
+    enough_mag = sd.n_mag_episodes >= SD_MIN_MAG_EPISODES
+    if not sd.have_vis:
+        mag_note = "vision-plan accel not in these logs (older openpilot)"
+    else:
+        mag_note = (f"median (aEgo − planned accel) over {sd.n_mag_samples} override samples, "
+                    f"{sd.n_mag_episodes} episodes")
+        if not enough_mag:
+            mag_note += f" — need {SD_MIN_MAG_EPISODES} episodes to score"
+    rows.append(_sd_row("gas_override_magnitude", "Gas-override magnitude", "m/s²",
+                        sd.overall_magnitude, SD_MAG_ANCHORS, enough_mag, mag_note,
+                        n_vals=sd.n_mag_episodes))
+    n_tb = sum(1 for e in sd.episodes if e.speed_taken_back is not None)
+    rows.append(_sd_row("speed_taken_back", "Speed taken back after release", "m/s",
+                        sd.speed_taken_back_median, None, False,
+                        f"median vEgo the model sheds in the 10 s after you lift off (n={n_tb})"))
+    rows.append(_sd_row("reoverride_pct", "Re-override within 15 s", "%",
+                        sd.reoverride_pct, None, False,
+                        "share of episodes followed by another within 15 s",
+                        n_vals=len(sd.episodes)))
+    return rows
+
+
+def _sd_bucket_results(sd, bucket: str) -> list[MetricResult]:
+    """Same rows for one mode/personality bucket (uniform across buckets so
+    the breakdown table can align them by index)."""
+    from .speed_disagreement import BucketStats
+
+    st = sd.bucket_stats.get(bucket) or BucketStats()
+    enough_time = sd.have_gas and st.seconds >= SD_MIN_SECONDS
+    note = f"{st.n_eps} episodes over {st.seconds / 60:.1f} min"
+    tb = float(np.median(st.taken_back)) if st.taken_back else None
+    reov = float(np.mean(st.reoverride)) if st.reoverride else None
+    return [
+        _sd_row("gas_override_rate", "Gas-override episodes", "/10min",
+                st.rate, SD_RATE_ANCHORS, enough_time, note),
+        _sd_row("gas_override_pct", "Gas-override time", "%",
+                st.pct, SD_PCT_ANCHORS, enough_time, note),
+        _sd_row("gas_override_magnitude", "Gas-override magnitude", "m/s²",
+                st.magnitude, SD_MAG_ANCHORS,
+                st.n_mag_eps >= SD_MIN_MAG_EPISODES, note, n_vals=st.n_mag_eps),
+        _sd_row("speed_taken_back", "Speed taken back after release", "m/s",
+                tb, None, False, note, n_vals=len(st.taken_back)),
+        _sd_row("reoverride_pct", "Re-override within 15 s", "%",
+                reov, None, False, note, n_vals=len(st.reoverride)),
+    ]
+
+
 def grade_breakdowns(
-    samples: dict, bucket_samples: dict
+    samples: dict, bucket_samples: dict, speed_disagreement=None
 ) -> dict[str, dict[str, BucketGrade]]:
     """Longitudinal grades per mode and per personality bucket.
 
@@ -547,6 +645,12 @@ def grade_breakdowns(
                 if mv:
                     any_data = True
                 cats[mdef.category].metrics.append(res)
+            if speed_disagreement is not None:
+                sd_rows = _sd_bucket_results(speed_disagreement, b)
+                cats["Speed Disagreement"].metrics.extend(sd_rows)
+                st = speed_disagreement.bucket_stats.get(b)
+                if any(r.score is not None for r in sd_rows) or (st and st.n_eps):
+                    any_data = True
             if not any_data:
                 continue
             for cat in cats.values():
@@ -568,6 +672,7 @@ def grade(
     bucket_samples: dict | None = None,
     adherence: dict | None = None,
     t_follow_targets: dict | None = None,
+    speed_disagreement_extra: dict | None = None,
 ) -> GradeReport:
     cats: dict[str, CategoryResult] = {}
     for grp, weights in CATEGORY_GROUPS.items():
@@ -586,6 +691,11 @@ def grade(
     if adherence and t_follow_targets:
         cats["Following"].metrics.extend(adherence_results(adherence, t_follow_targets))
         cats["Following"].extra["t_follow_targets"] = dict(t_follow_targets)
+
+    sd = (speed_disagreement_extra or {}).get("result")
+    if sd is not None:
+        cats["Speed Disagreement"].metrics.extend(speed_disagreement_results(sd))
+        cats["Speed Disagreement"].extra.update(speed_disagreement_extra)
 
     for cat in cats.values():
         scored = [m.score for m in cat.metrics if m.score is not None]
@@ -606,7 +716,10 @@ def grade(
             grp.score = sum(c.score * w for c, w in valid) / tw
         groups.append(grp)
 
-    breakdowns = grade_breakdowns(samples, bucket_samples) if bucket_samples else {}
+    breakdowns = (
+        grade_breakdowns(samples, bucket_samples, speed_disagreement=sd)
+        if bucket_samples else {}
+    )
 
     valid_g = [g for g in groups if g.score is not None]
     if valid_g:

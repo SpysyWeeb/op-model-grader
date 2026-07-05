@@ -43,6 +43,7 @@ class Analysis:
     bucket_times: dict = field(default_factory=dict)  # bucket -> model-long seconds
     model_id: dict | None = None
     counterfactual: object | None = None  # counterfactual.Counterfactual
+    speed_disagreement: object | None = None  # speed_disagreement.SpeedDisagreementResult
     grades: GradeReport | None = None
 
 
@@ -197,6 +198,16 @@ def analyze(per_drive: list[PerDrive], t_follow_targets: dict | None = None) -> 
         if ev.drive in by_name:
             by_name[ev.drive].append(ev)
 
+    # Speed Disagreement: gas overrides (without disengaging) and brake-forced
+    # disengagements -- both directions of "I wanted a different speed than
+    # the model".
+    from .speed_disagreement import analyze_speed_disagreement
+
+    an.speed_disagreement = analyze_speed_disagreement(per_drive)
+    for ev in an.speed_disagreement.events:
+        if ev.drive in by_name:
+            by_name[ev.drive].append(ev)
+
     an.samples, an.bucket_samples = collect_samples(per_drive)
     add_turn_samples(an.samples, an.turns, an.intents)
     an.adherence = _follow_adherence(per_drive)
@@ -229,5 +240,6 @@ def analyze(per_drive: list[PerDrive], t_follow_targets: dict | None = None) -> 
         bucket_samples=an.bucket_samples,
         adherence=an.adherence,
         t_follow_targets=an.t_follow_targets,
+        speed_disagreement_extra={"result": an.speed_disagreement} if an.speed_disagreement else None,
     )
     return an
