@@ -3,16 +3,33 @@ import pytest
 
 from opgrader.grading import (
     CATEGORY_GROUPS,
+    METRIC_BY_KEY,
     METRICS,
+    add_turn_samples,
     grade,
     letter,
     score_absolute,
     score_ratio,
 )
+from opgrader.lateral import TurnEpisode
 
 
 def empty_samples():
     return {m.key: {"model": [], "driver": []} for m in METRICS}
+
+
+def _ep(engaged=True, sharp=True, contaminated=False, rescued=False,
+        never_commanded=False, cmd_onset_lead=None, cmd_unwind_lead=None,
+        side="left", i=(0, 1)):
+    """Minimal TurnEpisode for add_turn_samples wiring tests."""
+    return TurnEpisode(
+        engaged=engaged, drive="synth", side=side, sharp=sharp,
+        band="90-150" if sharp else "20-90", i0=i[0], i1=i[1],
+        t_onset=0.0, v_onset=5.0, peak_act=120.0 if side == "left" else -120.0,
+        peak_cmd=None, t_peak_act=1.0, contaminated=contaminated, rescued=rescued,
+        never_commanded=never_commanded, cmd_onset_lead=cmd_onset_lead,
+        cmd_unwind_lead=cmd_unwind_lead,
+    )
 
 
 def test_score_ratio_anchor_points():
@@ -142,3 +159,78 @@ def test_score_ratio_match_penalizes_both_directions():
     assert score_ratio(2.0, 1.0, better="match") == 50.0
     assert score_ratio(0.5, 1.0, better="match") == 50.0  # half your gap = same penalty as double
     assert score_ratio(0.25, 1.0, better="match") == 0.0
+
+
+# ------------------------------------------------------ Turn-In Timing (blinker-free)
+
+
+def test_turn_in_delay_retired():
+    assert "turn_in_delay" not in METRIC_BY_KEY
+    assert not any(m.key == "turn_in_delay" for m in METRICS)
+
+
+def test_cmd_onset_lead_scored_metric_defs():
+    for key in ("cmd_onset_lead_left", "cmd_onset_lead_right"):
+        d = METRIC_BY_KEY[key]
+        assert d.category == "Turn-In Timing"
+        assert d.scorer == "abs"
+        assert d.needs_driver is False
+        assert d.abs_anchors == (0.0, 0.5, 1.5)
+
+
+def test_missed_turn_in_counts_only_engaged_sharp_never_commanded():
+    turns = [
+        _ep(engaged=True, sharp=True, never_commanded=True),   # counts: 100
+        _ep(engaged=True, sharp=True, never_commanded=False),  # counts: 0
+        _ep(engaged=True, sharp=False, never_commanded=True),  # curve turn: excluded
+        _ep(engaged=False, sharp=True, never_commanded=True),  # driver side: excluded
+    ]
+    samples = empty_samples()
+    add_turn_samples(samples, turns)
+    assert samples["missed_turn_in"]["model"] == [100.0, 0.0]
+
+
+def test_missed_turn_in_not_gated_by_contaminated():
+    """Contamination (the driver forcing the wheel) is exactly the mechanism
+    by which "the model never commanded this turn" shows up in practice --
+    gating missed_turn_in on it would exclude the cases it exists to catch."""
+    turns = [
+        _ep(engaged=True, sharp=True, never_commanded=True, contaminated=True),
+        _ep(engaged=True, sharp=True, never_commanded=True, rescued=True),
+    ]
+    samples = empty_samples()
+    add_turn_samples(samples, turns)
+    assert samples["missed_turn_in"]["model"] == [100.0, 100.0]
+
+
+def test_cmd_onset_lead_excluded_when_contaminated_or_rescued():
+    """cmd_onset_lead mirrors cmd_unwind_lead's existing exclusion: a
+    contaminated/rescued episode's cmd-vs-act timing comparison is noisy
+    (the driver's own torque, not the model's onset behavior)."""
+    turns = [
+        _ep(engaged=True, cmd_onset_lead=0.4, contaminated=False, rescued=False, side="left"),
+        _ep(engaged=True, cmd_onset_lead=0.9, contaminated=True, side="left"),
+        _ep(engaged=True, cmd_onset_lead=0.7, rescued=True, side="left"),
+    ]
+    samples = empty_samples()
+    add_turn_samples(samples, turns)
+    assert samples["cmd_onset_lead_left"]["model"] == [0.4]
+
+
+def test_cmd_onset_lead_anchor_scores():
+    samples = empty_samples()
+    samples["cmd_onset_lead_left"]["model"] = [-0.3, -0.3, -0.3]  # negative -> clipped to 100
+    samples["cmd_onset_lead_right"]["model"] = [0.25, 0.25, 0.25]  # halfway to the 50-point anchor
+    rep = grade(samples)
+    res = {m.definition.key: m for c in rep.categories for m in c.metrics}
+    assert res["cmd_onset_lead_left"].score == pytest.approx(100.0)
+    assert res["cmd_onset_lead_right"].score == pytest.approx(75.0)
+
+
+def test_missed_turn_in_anchor_scoring_unchanged_shape():
+    samples = empty_samples()
+    samples["missed_turn_in"]["model"] = [100.0, 0.0, 0.0, 0.0]  # 25% missed
+    rep = grade(samples)
+    m = next(m for c in rep.categories for m in c.metrics if m.definition.key == "missed_turn_in")
+    assert m.model_agg == pytest.approx(25.0)
+    assert m.score == pytest.approx(50.0)

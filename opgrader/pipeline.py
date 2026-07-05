@@ -214,7 +214,7 @@ def analyze(
             by_name[ev.drive].append(ev)
 
     an.samples, an.bucket_samples = collect_samples(per_drive)
-    add_turn_samples(an.samples, an.turns, an.intents)
+    add_turn_samples(an.samples, an.turns)
     an.adherence = _follow_adherence(per_drive)
     an.bucket_times = _bucket_times(per_drive)
 

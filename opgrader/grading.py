@@ -141,17 +141,27 @@ METRICS: list[MetricDef] = [
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
     MetricDef("cmd_unwind_lead_right", "Cmd-vs-actual unwind lead (right)", "Turn Execution", "s",
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
-    # ---- Lateral / Turn-In Timing (per intersection-turn intent)
-    MetricDef("turn_in_delay", "Turn-in delay after blinker", "Turn-In Timing", "s", eps=0.2),
+    # ---- Lateral / Turn-In Timing (per sharp low-speed turn episode,
+    # signaled or not -- blinker-free, sourced from the same TurnEpisodes
+    # Turn Execution uses; see add_turn_samples)
     MetricDef(
         "missed_turn_in", "Missed turn-ins", "Turn-In Timing", "%",
         agg="mean", scorer="abs", abs_anchors=(0.0, 25.0, 50.0), needs_driver=False,
-        note="absolute scale: 100 at 0%, 50 at 25%, 0 at ≥50% of engaged turn intents",
+        note="absolute scale: 100 at 0%, 50 at 25%, 0 at ≥50% of engaged sharp turns "
+        "where the model's own commanded path never called for the turn at all",
     ),
-    MetricDef("cmd_onset_lead_left", "Cmd-vs-actual onset lead (left)", "Turn-In Timing", "s",
-              agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
-    MetricDef("cmd_onset_lead_right", "Cmd-vs-actual onset lead (right)", "Turn-In Timing", "s",
-              agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
+    MetricDef(
+        "cmd_onset_lead_left", "Cmd-vs-actual onset lead (left)", "Turn-In Timing", "s",
+        scorer="abs", abs_anchors=(0.0, 0.5, 1.5), needs_driver=False,
+        note="absolute scale: 100 at <=0s (model commands at/before the wheel moves), "
+        "50 at 0.5s late, 0 at >=1.5s late",
+    ),
+    MetricDef(
+        "cmd_onset_lead_right", "Cmd-vs-actual onset lead (right)", "Turn-In Timing", "s",
+        scorer="abs", abs_anchors=(0.0, 0.5, 1.5), needs_driver=False,
+        note="absolute scale: 100 at <=0s (model commands at/before the wheel moves), "
+        "50 at 0.5s late, 0 at >=1.5s late",
+    ),
     # ---- Lateral / General Smoothness (per span)
     MetricDef("rms_lat_jerk", "RMS lateral jerk", "General Smoothness", "m/s³", eps=0.02),
     MetricDef("steer_rate_rms", "Steering rate RMS (>10 m/s)", "General Smoothness", "deg/s", eps=0.5),
@@ -422,12 +432,22 @@ def collect_samples(
     return samples, bucket_samples
 
 
-def add_turn_samples(samples: dict, turns, intents) -> None:
-    """Fold turn episodes and intent windows into the sample lists.
+def add_turn_samples(samples: dict, turns) -> None:
+    """Fold turn episodes into the sample lists.
 
-    Turn-execution behavior metrics skip engaged episodes where the driver
-    interfered before the peak (contaminated) or during the unwind (rescued):
-    those are not the model's unwind. Rescue itself is the rescue_rate signal.
+    Turn Execution's behavior metrics (and the onset-timing lag,
+    cmd_onset_lead) skip engaged episodes where the driver interfered before
+    the peak (contaminated) or during the unwind (rescued): those aren't the
+    model's own unwind/onset, they're a human-forced one. Rescue itself is
+    the rescue_rate signal.
+
+    missed_turn_in is the one exception: it is NOT gated on contaminated,
+    because contamination -- the driver forcing the wheel through a turn --
+    is exactly the mechanism by which "the model's own plan never called for
+    this turn" (never_commanded) shows up in practice. Gating it the same
+    way as the others would exclude precisely the cases it exists to catch,
+    making the rate vacuous. This category is blinker-free: every sharp
+    low-speed turn counts, signaled or not (see lateral.detect_turn_episodes).
     """
 
     def add(key, side, value):
@@ -441,6 +461,8 @@ def add_turn_samples(samples: dict, turns, intents) -> None:
             # up to the peak (driver forcing the wheel earlier is a different
             # failure, measured by turn-in metrics)
             add("rescue_rate", "model", 100.0 if ep.rescued else 0.0)
+        if ep.engaged and ep.sharp:
+            add("missed_turn_in", "model", 100.0 if ep.never_commanded else 0.0)
         if ep.engaged and (ep.contaminated or ep.rescued):
             continue
         # sharp turns feed the scored metrics; 20-90 deg curve episodes are
@@ -452,19 +474,8 @@ def add_turn_samples(samples: dict, turns, intents) -> None:
         add(prefix + "unwind_rate", side, ep.unwind_rate)
         if ep.engaged and ep.cmd_unwind_lead is not None:
             add(f"cmd_unwind_lead_{ep.side}", "model", ep.cmd_unwind_lead)
-
-    for w in intents:
-        if w.outcome != "turn":
-            continue
-        if not w.engaged:
-            if w.delay is not None:
-                samples["turn_in_delay"]["driver"].append(float(w.delay))
-        else:
-            samples["missed_turn_in"]["model"].append(100.0 if w.missed else 0.0)
-            if w.delay is not None:
-                samples["turn_in_delay"]["model"].append(float(w.delay))
-            if w.cmd_onset_lead is not None:
-                samples[f"cmd_onset_lead_{w.side}"]["model"].append(float(w.cmd_onset_lead))
+        if ep.engaged and ep.cmd_onset_lead is not None:
+            add(f"cmd_onset_lead_{ep.side}", "model", ep.cmd_onset_lead)
 
 
 # ------------------------------------------------------------------ grading

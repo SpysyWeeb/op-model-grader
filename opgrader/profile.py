@@ -145,10 +145,10 @@ def _pp_bin_label(lo: float, hi: float) -> str:
     return f"{lo:g}-{hi:g}mph"
 
 
-def _route_metrics_blob(drive, seg, da, events, turns, intents, pp_score_fn) -> dict:
+def _route_metrics_blob(drive, seg, da, events, turns, pp_score_fn) -> dict:
     """This one route's own poolable driver-side samples (route-atomic)."""
     rsamples, _rbuckets = collect_samples([(drive, seg, da, events)])
-    add_turn_samples(rsamples, turns, intents)
+    add_turn_samples(rsamples, turns)
     blob: dict[str, dict[str, list[float]]] = {}
     for key in poolable_metric_keys():
         vals = _finite(rsamples.get(key, {}).get("driver", []))
@@ -280,20 +280,15 @@ def pool_for_grading(an, per_drive, pp_score_fn, save: bool = True) -> tuple[Pro
     fingerprints = sorted({d.meta.car_fingerprint for d, _s, _a, _e in per_drive})
 
     turns_by_drive: dict[str, list] = {}
-    intents_by_drive: dict[str, list] = {}
     for t in an.turns:
         turns_by_drive.setdefault(t.drive, []).append(t)
-    for w in an.intents:
-        intents_by_drive.setdefault(w.drive, []).append(w)
 
     # 1. this run's own per-route contributions (storage + provenance)
     route_updates: dict[str, dict[str, dict]] = {}
     for drive, seg, da, events in per_drive:
         fp = drive.meta.car_fingerprint
         blob = _route_metrics_blob(
-            drive, seg, da, events,
-            turns_by_drive.get(drive.name, []), intents_by_drive.get(drive.name, []),
-            pp_score_fn,
+            drive, seg, da, events, turns_by_drive.get(drive.name, []), pp_score_fn,
         )
         route_updates.setdefault(fp, {})[drive.name] = {
             "wall_time_start": drive.meta.wall_time_start,
