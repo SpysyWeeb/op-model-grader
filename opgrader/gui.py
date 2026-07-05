@@ -35,8 +35,6 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(f"op-model-grader {__version__}")
-        root.geometry("880x640")
-        root.minsize(720, 520)
 
         self.jobs = C.JobManager()
         self.jwt: str | None = None
@@ -48,6 +46,7 @@ class App:
 
         self._q: queue.Queue = queue.Queue()
         self._build_widgets()
+        self._apply_source()
         root.after(50, self._pump)
         self._bg(self._check_auth, self._on_auth_checked)
         self._refresh_reports()
@@ -87,6 +86,17 @@ class App:
 
     def _build_widgets(self):
         pad = {"padx": 8, "pady": 4}
+        self._pad = pad
+
+        # log source toggle
+        src = ttk.Frame(self.root)
+        src.pack(fill="x", **pad)
+        ttk.Label(src, text="Grade from:").pack(side="left", padx=(4, 8))
+        self.source_var = tk.StringVar(value="connect")
+        ttk.Radiobutton(src, text="comma connect (your uploaded drives)", value="connect",
+                        variable=self.source_var, command=self._apply_source).pack(side="left")
+        ttk.Radiobutton(src, text="local rlog folders", value="local",
+                        variable=self.source_var, command=self._apply_source).pack(side="left", padx=12)
 
         # auth bar
         self.auth_frame = ttk.LabelFrame(self.root, text="comma account")
@@ -104,6 +114,7 @@ class App:
         # device + routes
         routes_frame = ttk.LabelFrame(self.root, text="drives on your device")
         routes_frame.pack(fill="both", expand=True, **pad)
+        self.routes_frame = routes_frame
         top = ttk.Frame(routes_frame)
         top.pack(fill="x", padx=6, pady=4)
         ttk.Label(top, text="Device:").pack(side="left")
@@ -135,6 +146,7 @@ class App:
 
         act = ttk.Frame(self.root)
         act.pack(fill="x", **pad)
+        self.act_frame = act
         self.upload_btn = ttk.Button(
             act, text="Request upload for selected", command=self._request_upload
         )
@@ -147,18 +159,22 @@ class App:
         self.upload_msg.pack(side="left", padx=10)
 
         # local folders
-        local = ttk.LabelFrame(self.root, text="local rlog folders (optional)")
+        local = ttk.LabelFrame(self.root, text="local rlog folders")
         local.pack(fill="x", **pad)
+        self.local_frame = local
         lrow = ttk.Frame(local)
         lrow.pack(fill="x", padx=6, pady=4)
         ttk.Button(lrow, text="Add folder…", command=self._add_folder).pack(side="left")
         ttk.Button(lrow, text="Remove selected", command=self._remove_folder).pack(side="left", padx=6)
-        self.paths_list = tk.Listbox(local, height=2)
+        ttk.Label(lrow, text="each folder should contain rlog files or segment dirs",
+                  foreground="gray").pack(side="left", padx=10)
+        self.paths_list = tk.Listbox(local, height=5)
         self.paths_list.pack(fill="x", padx=6, pady=(0, 6))
 
         # grade + progress
         grade = ttk.LabelFrame(self.root, text="grade")
         grade.pack(fill="x", **pad)
+        self.grade_frame = grade
         tf = ttk.Frame(grade)
         tf.pack(fill="x", padx=6, pady=(4, 0))
         ttk.Label(tf, text="personality follow targets (s):").pack(side="left")
@@ -195,6 +211,29 @@ class App:
         self.cache_label = ttk.Label(rrow, text="", foreground="gray")
         self.cache_label.pack(side="right", padx=(0, 4))
         ttk.Button(rrow, text="Clear downloaded rlogs", command=self._clear_cache).pack(side="right", padx=6)
+
+    # --------------------------------------------------------------- source
+
+    def _apply_source(self):
+        """Show either the connect panels or the local-folder panel, then refit."""
+        connect = self.source_var.get() == "connect"
+        for f in (self.auth_frame, self.routes_frame, self.act_frame, self.local_frame):
+            f.pack_forget()
+        if connect:
+            self.auth_frame.pack(fill="x", before=self.grade_frame, **self._pad)
+            self.routes_frame.pack(fill="both", expand=True, before=self.grade_frame, **self._pad)
+            self.act_frame.pack(fill="x", before=self.grade_frame, **self._pad)
+        else:
+            self.local_frame.pack(fill="x", before=self.grade_frame, **self._pad)
+        self._fit_window()
+
+    def _fit_window(self):
+        """Size the window so the whole UI fits without manual resizing."""
+        self.root.update_idletasks()
+        w = max(880, self.root.winfo_reqwidth())
+        h = self.root.winfo_reqheight()
+        self.root.geometry(f"{w}x{h}")
+        self.root.minsize(w, h)
 
     # ----------------------------------------------------------------- auth
 
@@ -423,11 +462,15 @@ class App:
     # -------------------------------------------------------------- grading
 
     def _grade(self):
-        routes = list(self.tree.selection())
-        if not routes and not self.local_paths:
+        connect = self.source_var.get() == "connect"
+        routes = list(self.tree.selection()) if connect else []
+        local_paths = [] if connect else list(self.local_paths)
+        if not routes and not local_paths:
             messagebox.showinfo(
                 "nothing selected",
-                "Select one or more drives above (with rlogs ready), or add a local folder.",
+                "Select one or more drives above (with rlogs ready)."
+                if connect
+                else "Add one or more local rlog folders above.",
             )
             return
 
@@ -470,7 +513,7 @@ class App:
                 return
         set_t_follow(targets)  # persist for next time (and for the CLI)
 
-        if not self.jobs.try_start(", ".join(routes + self.local_paths)):
+        if not self.jobs.try_start(", ".join(routes + local_paths)):
             messagebox.showinfo("busy", "A grading job is already running — wait for it to finish.")
             return
         self.grade_btn.config(state="disabled")
@@ -478,7 +521,7 @@ class App:
         self.progress.start(80)
         threading.Thread(
             target=C.run_grade_job,
-            args=(self.jobs, routes, list(self.local_paths), self.jwt, targets),
+            args=(self.jobs, routes, local_paths, self.jwt, targets),
             daemon=True,
         ).start()
         self.root.after(POLL_JOB_MS, self._poll_job)
