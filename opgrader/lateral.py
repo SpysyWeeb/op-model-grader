@@ -10,6 +10,17 @@ All detection happens inside engaged/manual spans (which never cross
 inter-segment time gaps > 1 s), except blinker turn-intent windows, which are
 detected on the whole timeline (a disengagement inside the window is part of
 the signal) and discarded if they cross a gap.
+
+Turn-In Timing's scored metric is cmd-vs-actual DIVERGENCE during genuine
+driver resistance, not torque-ceiling status: a continuously-replanning
+vision model rarely "refuses" a turn outright, so what actually matters is
+how far the realized path ended up from what the model wanted while the
+driver was actively fighting it. "Genuine resistance" = steeringPressed
+True AND the driver's torque sign opposes the model's own commanded torque
+(torqueState.output), sustained >= CONFLICT_MIN_S -- not merely a hand
+resting on the wheel. torque_output/initiator/torque_ceiling_* are kept as
+DESCRIPTIVE/diagnostic context (who moved first, was the model already at
+its output limit) but never gate whether an episode counts.
 """
 
 from __future__ import annotations
@@ -29,6 +40,16 @@ TURN_PEAK_MIN_DEG = 90.0  # sharp-turn peak threshold
 SHARP_MAX_ONSET_V = 15 * MPH  # 6.7 m/s
 OVERSHOOT_WINDOW_S = 4.0
 WOBBLE_MIN_DEG = 10.0
+
+# initiator / torque-ceiling classification (who steered a sharp turn, and if
+# the driver did, was the model already commanding max torque beforehand).
+# Constants verified against real Palisade data -- see detect_turn_episodes.
+INITIATOR_TOL_S = 0.15  # "at/before onset" tolerance for driver- or model-led
+CEILING_FRAC = 0.92  # |torque_output| at/above this counts as "at the ceiling"
+CEILING_MIN_S = 0.3  # ceiling must be sustained this long to count as real
+MIN_PRE_OVERRIDE_S = 0.3  # need at least this much pre-override data to judge at all
+CONFLICT_MIN_S = 0.3  # sustained opposition needed to count as genuine resistance,
+                      # not an incidental hand-on-wheel moment
 
 PP_BINS_MPH: list[tuple[float, float]] = [
     (0, 5), (5, 10), (10, 20), (20, 35), (35, 55), (55, 200),
@@ -122,6 +143,21 @@ class TurnEpisode:
     cmd_unwind_lead: float | None = None  # cmd 50% crossing minus act 50% crossing
     cmd_onset_lead: float | None = None  # cmd's first |>=20deg| crossing minus t_onset
     never_commanded: bool = False  # engaged: wheel turned sharply but cmd never called for it
+    # who steered this turn in, and (if the driver did) was there a torque-
+    # ceiling defense for the model -- engaged episodes only, see
+    # detect_turn_episodes for the exact classification rules
+    override_onset_t: float | None = None  # first steeringPressed within the episode window
+    initiator: str = "unknown"  # "model" | "driver" | "lag" | "unknown" -- DESCRIPTIVE, not scored
+    torque_ceiling_pre_override: bool | None = None  # diagnostic only, see module docstring
+    torque_ceiling_direction_agrees: bool | None = None  # only meaningful when the above is True
+    # SCORED quantity: peak |actual - commanded| angle during a sustained
+    # window of genuine driver resistance (steering torque opposing the
+    # model's own commanded torque, sustained >= CONFLICT_MIN_S). None if no
+    # such window exists in this episode -- nothing scored against the model
+    # when there was no real disagreement to diverge from.
+    divergence_deg: float | None = None
+    conflict_duration_s: float | None = None  # duration of the window divergence_deg came from
+    conflict_ceiling: bool | None = None  # diagnostic: was torque_output at the ceiling during it
 
 
 def _band(peak_abs: float) -> str:
@@ -150,6 +186,7 @@ def detect_turn_episodes(
         )
         lat_flag = da.lat_model[sl]
         override = da.lat_override[sl]
+        torque = da.torque_output[sl] if da.torque_output is not None else None
 
         for a, b in _contiguous_runs(combined >= TURN_ONSET_DEG):
             if b - a < 3:
@@ -198,6 +235,7 @@ def detect_turn_episodes(
                 ep.rescued = bool(pressed[ph].any() or (~lat_flag[ph]).any())
 
             # commanded-signal peak, onset lead, and unwind lead
+            t_onset_cmd = None  # used below for initiator classification
             if cmd is not None:
                 ip_cmd = a + int(np.argmax(np.abs(cmd[a:b])))
                 ep.peak_cmd = float(cmd[ip_cmd])
@@ -220,12 +258,110 @@ def detect_turn_episodes(
                     ion_cmd = _first_idx((sgn * cmd >= TURN_ONSET_DEG)[:b], a)
                     if ion_cmd is not None:
                         ep.cmd_onset_lead = float(t[ion_cmd] - t[a])
+                        t_onset_cmd = float(t[ion_cmd])
                 if abs(ep.peak_cmd) >= TURN_ONSET_DEG:
                     if iu_act is not None:
                         below_half_cmd = np.abs(cmd) <= UNWIND_FRACTION * abs(ep.peak_cmd)
                         iu_cmd = _first_idx(below_half_cmd[:end], ip_cmd + 1)
                         if iu_cmd is not None:
                             ep.cmd_unwind_lead = float(t[iu_cmd] - t[iu_act])
+
+            # who steered this turn in: did the driver's hand get there
+            # first (override_onset_t at/before t_onset), the model's own
+            # commanded path lead the physical result (cmd led), or did the
+            # physical angle simply outrun a model that hadn't caught up yet
+            # (a control-loop lag, not clearly either party's doing)?
+            if engaged:
+                op_idx = _first_idx(pressed[a:b])
+                if op_idx is not None:
+                    ep.override_onset_t = float(t[a + op_idx])
+
+                if ep.override_onset_t is not None and ep.override_onset_t <= ep.t_onset + INITIATOR_TOL_S:
+                    ep.initiator = "driver"
+                elif cmd is None:
+                    ep.initiator = "unknown"  # old log / no commanded-angle source at all
+                elif t_onset_cmd is not None and t_onset_cmd <= ep.t_onset + INITIATOR_TOL_S:
+                    ep.initiator = "model"
+                else:
+                    ep.initiator = "lag"  # cmd caught up late, or never did -- not clearly the driver's doing
+
+                # torque-ceiling defense: was the model already sustained at
+                # its output ceiling BEFORE the override started? The window
+                # searched ends strictly at override_onset_t (never overlaps
+                # or extends past it) -- torque pegging "at the same time as"
+                # the override is not exonerating evidence, it could just be
+                # the controller fighting the driver's own input in that
+                # instant (confirmed on real data: steeringPressed can go
+                # True essentially at the same sample the ceiling is hit).
+                if ep.override_onset_t is not None and torque is not None:
+                    ov_idx = a + op_idx
+                    pre_t = t[a:ov_idx]
+                    if len(pre_t) >= 2 and (pre_t[-1] - pre_t[0]) >= MIN_PRE_OVERRIDE_S:
+                        pre_torque = torque[a:ov_idx]
+                        ceiling_mask = np.abs(pre_torque) >= CEILING_FRAC
+                        found_run = None
+                        for ca, cb in _contiguous_runs(ceiling_mask):
+                            if pre_t[cb - 1] - pre_t[ca] >= CEILING_MIN_S:
+                                found_run = (ca, cb)
+                                break
+                        ep.torque_ceiling_pre_override = found_run is not None
+                        if found_run is not None:
+                            ca, cb = found_run
+                            # direction agreement: maxed-out torque pushing
+                            # the SAME way as the turn ended up going is a
+                            # real capability ceiling (exonerating); maxed
+                            # out the OTHER way means the model's plan
+                            # disagreed with the turn -- capability is beside
+                            # the point, and that must not be conflated in
+                            # with the exonerating bucket.
+                            ep.torque_ceiling_direction_agrees = bool(
+                                np.sign(np.median(pre_torque[ca:cb])) == sgn
+                            )
+                    # else: <0.3s of pre-override data exists at all -- can't
+                    # judge, torque_ceiling_pre_override stays None
+
+            # SCORED: cmd-vs-actual divergence during genuine driver
+            # resistance. "Resistance" = steeringPressed AND the driver's
+            # torque opposes the model's own commanded torque -- the sign
+            # check validated by hand against a real episode where the
+            # model wanted left, the driver's hand physically overpowered
+            # it to the right, and torqueState.output/steeringTorque had
+            # opposite signs throughout. Falls back to opposing ACT-vs-CMD
+            # angle signs when either torque channel is unavailable (angle-
+            # control cars, old logs) so the metric still degrades
+            # gracefully instead of going dark. Every engaged episode is
+            # eligible -- sharp or curve-band, unlike the old sharp-only
+            # missed_turn_in -- because the owner wants every real tug-of-
+            # war counted, not just the ones that happen to cross 90 deg.
+            if engaged and cmd is not None:
+                driver_t = da.driver_torque[sl] if da.driver_torque is not None else None
+                if driver_t is not None and torque is not None:
+                    opposing = (np.sign(driver_t) != np.sign(torque)) & (driver_t != 0) & (torque != 0)
+                else:
+                    opposing = (np.sign(act) != np.sign(cmd)) & (act != 0) & (cmd != 0)
+                conflict_mask = pressed & opposing
+
+                best = None  # (divergence, duration, ra, rb) -- span-local indices
+                for ca, cb in _contiguous_runs(conflict_mask[a:b]):
+                    ra, rb = a + ca, a + cb
+                    dur = float(t[rb - 1] - t[ra]) if rb > ra else 0.0
+                    if dur < CONFLICT_MIN_S:
+                        continue
+                    div = float(np.max(np.abs(act[ra:rb] - cmd[ra:rb])))
+                    if best is None or div > best[0]:
+                        best = (div, dur, ra, rb)
+
+                if best is not None:
+                    div, dur, ra, rb = best
+                    ep.divergence_deg = div
+                    ep.conflict_duration_s = dur
+                    if torque is not None:
+                        win_t = t[ra:rb]
+                        ceil_mask = np.abs(torque[ra:rb]) >= CEILING_FRAC
+                        ep.conflict_ceiling = any(
+                            win_t[zb - 1] - win_t[za] >= CEILING_MIN_S
+                            for za, zb in _contiguous_runs(ceil_mask)
+                        )
 
             # S-curve overshoot after the actual angle unwinds through zero
             izero = _first_idx((sgn * act <= 0)[:end], ip_act + 1)
