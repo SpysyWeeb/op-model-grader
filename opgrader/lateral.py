@@ -65,22 +65,29 @@ def swing_reversal_count(x: np.ndarray, thresh: float = PP_SWING_DEG) -> int:
         return 0
     count = 0
     direction = 0  # +1 rising, -1 falling, 0 uncommitted
-    ref = x[0]
+    ext = x[0]  # running extreme of the current direction
     for v in x[1:]:
-        if direction >= 0 and v > ref:
-            ref = v
-        elif direction <= 0 and v < ref:
-            ref = v
-        if ref - v > thresh and direction != -1:
-            if direction == 1:
+        if direction == 0:
+            if v - ext > thresh:
+                direction = 1
+                ext = v
+            elif ext - v > thresh:
+                direction = -1
+                ext = v
+        elif direction == 1:
+            if v > ext:
+                ext = v
+            elif ext - v > thresh:
                 count += 1
-            direction = -1
-            ref = v
-        elif v - ref > thresh and direction != 1:
-            if direction == -1:
+                direction = -1
+                ext = v
+        else:
+            if v < ext:
+                ext = v
+            elif v - ext > thresh:
                 count += 1
-            direction = 1
-            ref = v
+                direction = 1
+                ext = v
     return count
 
 
@@ -207,20 +214,35 @@ def detect_turn_episodes(
                     opp = -sgn * w  # positive = opposite-sign excursion
                     ep.overshoot_deg = float(max(0.0, np.max(opp)))
                     ep.overshoot_pct = 100.0 * ep.overshoot_deg / abs(peak_act)
-                    # recovery wobbles: zero re-crossings whose following lobe > 10 deg
-                    wob = 0
-                    s = np.sign(w)
-                    s[s == 0] = 1
-                    changes = np.flatnonzero(np.diff(s) != 0)
-                    prev = 0
-                    bounds = list(changes + 1) + [len(w)]
-                    for lb2 in bounds:
-                        lobe = w[prev:lb2]
-                        if prev > 0 and len(lobe) and np.max(np.abs(lobe)) > WOBBLE_MIN_DEG:
-                            wob += 1
-                        prev = lb2
-                    ep.wobbles = wob
+                    # recovery wobbles: zero re-crossings after the overshoot
+                    # excursion whose lobe exceeds 10 deg (0.5 deg deadband)
+                    lobes: list[float] = []
+                    cur_sign, cur_max = 0, 0.0
+                    for val in w:
+                        sg = 1 if val > 0.5 else (-1 if val < -0.5 else 0)
+                        if sg == 0:
+                            continue
+                        if sg != cur_sign and cur_sign != 0:
+                            lobes.append(cur_max)
+                            cur_max = 0.0
+                        cur_sign = sg
+                        cur_max = max(cur_max, abs(val))
+                    if cur_sign != 0:
+                        lobes.append(cur_max)
+                    ep.wobbles = sum(1 for m in lobes[1:] if m > WOBBLE_MIN_DEG)
 
+            # suppress recovery excursions: an opposite-side "turn" starting
+            # right after a bigger episode's unwind is its S-curve overshoot,
+            # not a new maneuver (it is already measured as overshoot_pct)
+            prev = episodes[-1] if episodes and episodes[-1].drive == drive_name else None
+            if (
+                prev is not None
+                and prev.i1 >= span.i0  # same span region
+                and ep.t_onset - da.t[min(prev.i1, len(da.t) - 1)] < OVERSHOOT_WINDOW_S + 2.0
+                and ep.side != prev.side
+                and abs(ep.peak_act) < 0.5 * abs(prev.peak_act)
+            ):
+                continue
             episodes.append(ep)
     return episodes
 
@@ -404,9 +426,13 @@ def detect_intent_windows(
     rb = da.right_blinker if da.right_blinker is not None else np.zeros(len(t), bool)
     pressed = da.steering_pressed if da.steering_pressed is not None else np.zeros(len(t), bool)
 
-    # heading rate: measured yaw if available, else vehicle-model from the wheel
+    # heading rate, LEFT-positive to match the ISO steering sign.
+    # livePose/liveLocationKalman angularVelocityDevice.z is right-positive
+    # (device frame, z down) -- verified empirically against blinker sides --
+    # so measured yaw is negated; the vehicle-model fallback derives from the
+    # steering angle and is already left-positive.
     if da.yaw_rate is not None:
-        hr = da.yaw_rate
+        hr = -da.yaw_rate
     elif vm is not None:
         with np.errstate(all="ignore"):
             hr = vm.calc_curvature(np.radians(act) / 1.0, np.maximum(v, 0.1)) * v
@@ -455,7 +481,12 @@ def detect_intent_windows(
             crossed = sgn * act[i_on:i_end] >= TURN_ONSET_DEG
             ic = _first_idx(crossed)
             press_slice = pressed[i_on:i_end]
-            diseng = engaged and (~da.lat_model[i_on:i_end]).any()
+            # a lat disengagement only counts against the model if it happens
+            # before the turn-in crossing (the turn was then taken manually)
+            lat_slice = da.lat_model[i_on:i_end]
+            diseng = engaged and (
+                (~lat_slice[:ic]).any() if ic is not None else (~lat_slice).any()
+            )
             if not engaged:
                 if ic is not None:
                     w.delay = float(t[i_on + ic] - t_on)

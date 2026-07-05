@@ -138,8 +138,10 @@ def segment_drive(drive: Drive) -> Segmentation | None:
 
     lat_model = aligned_bool("latActive")
     long_model = aligned_bool("longActive")
-    per_axis = lat_model is not None and long_model is not None and (
-        lat_model.any() or long_model.any() or not enabled.any()
+    per_axis = bool(
+        lat_model is not None
+        and long_model is not None
+        and (lat_model.any() or long_model.any() or not enabled.any())
     )
     if not per_axis:
         # old logs: no per-axis actuator flags -> single-flag behavior

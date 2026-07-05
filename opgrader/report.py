@@ -211,13 +211,13 @@ def _metric_rows(metrics: list[MetricResult]) -> str:
     for m in metrics:
         d = m.definition
         if d.scorer == "none":
-            val = _fmt(m.model_agg)
             note = d.note or "diagnostic"
-            if m.n_model == 0:
+            if m.n_model == 0 and m.n_driver == 0:
                 note = "no data"
             rows.append(
                 f'<tr class="insuff"><td>{_esc(d.label)}</td>'
-                f"<td>{val}</td><td>–</td><td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
+                f"<td>{_fmt(m.model_agg)}</td><td>{_fmt(m.driver_agg)}</td>"
+                f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
             )
         elif m.score is None:
             need_d = " each" if d.needs_driver else ""

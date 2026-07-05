@@ -103,21 +103,27 @@ METRICS: list[MetricDef] = [
     MetricDef("pullaway_latency", "Lead pull-away latency", "Responsiveness", "s", eps=0.1),
     # ---- Lateral / Turn Execution (per turn episode)
     MetricDef(
-        "s_overshoot", "S-curve overshoot after unwind", "Turn Execution", "% of peak",
+        "s_overshoot", "S-curve overshoot after unwind (sharp turns)", "Turn Execution", "% of peak",
         eps=1.0, scorer="ratio_or_abs", abs_anchors=(5.0, 20.0, 40.0), abs_when_driver_below=5.0,
         note="absolute scale (100 at ≤5%, 50 at 20%, 0 at ≥40%) when your own overshoot is ~0",
     ),
     MetricDef(
-        "recovery_wobbles", "Recovery wobbles (>10° re-crossings)", "Turn Execution", "/turn",
+        "recovery_wobbles", "Recovery wobbles, >10° re-crossings (sharp turns)", "Turn Execution", "/turn",
         eps=0.1, scorer="ratio_or_abs", abs_anchors=(0.0, 1.0, 2.0), abs_when_driver_below=0.5,
         note="absolute scale (100 at 0, 50 at 1, 0 at ≥2 per turn) when your baseline is ~0",
     ),
-    MetricDef("unwind_rate", "Unwind rate after peak", "Turn Execution", "deg/s", better="higher", eps=1.0),
+    MetricDef("unwind_rate", "Unwind rate after peak (sharp turns)", "Turn Execution", "deg/s", better="higher", eps=1.0),
     MetricDef(
         "rescue_rate", "Driver-rescue rate in unwind", "Turn Execution", "%",
         agg="mean", scorer="abs", abs_anchors=(0.0, 25.0, 50.0), needs_driver=False,
-        note="absolute scale: 100 at 0%, 50 at 25%, 0 at ≥50% of engaged turns",
+        note="absolute scale: 100 at 0%, 50 at 25%, 0 at ≥50% of model-executed turns",
     ),
+    MetricDef("curve_s_overshoot", "Overshoot, curve episodes 20–90°", "Turn Execution", "% of peak",
+              scorer="none", needs_driver=False, note="reported separately, not scored"),
+    MetricDef("curve_recovery_wobbles", "Wobbles, curve episodes 20–90°", "Turn Execution", "/turn",
+              scorer="none", needs_driver=False, note="reported separately, not scored"),
+    MetricDef("curve_unwind_rate", "Unwind rate, curve episodes 20–90°", "Turn Execution", "deg/s",
+              scorer="none", needs_driver=False, note="reported separately, not scored"),
     MetricDef("cmd_unwind_lead_left", "Cmd-vs-actual unwind lead (left)", "Turn Execution", "s",
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
     MetricDef("cmd_unwind_lead_right", "Cmd-vs-actual unwind lead (right)", "Turn Execution", "s",
@@ -328,14 +334,20 @@ def add_turn_samples(samples: dict, turns, intents) -> None:
 
     for ep in turns:
         side = "model" if ep.engaged else "driver"
-        if ep.engaged:
+        if ep.engaged and not ep.contaminated:
+            # rescue rate counts only turns the model was actually executing
+            # up to the peak (driver forcing the wheel earlier is a different
+            # failure, measured by turn-in metrics)
             add("rescue_rate", "model", 100.0 if ep.rescued else 0.0)
         if ep.engaged and (ep.contaminated or ep.rescued):
             continue
-        add("s_overshoot", side, ep.overshoot_pct)
+        # sharp turns feed the scored metrics; 20-90 deg curve episodes are
+        # reported separately (diagnostic rows)
+        prefix = "" if ep.sharp else "curve_"
+        add(prefix + "s_overshoot", side, ep.overshoot_pct)
         if ep.wobbles is not None:
-            add("recovery_wobbles", side, float(ep.wobbles))
-        add("unwind_rate", side, ep.unwind_rate)
+            add(prefix + "recovery_wobbles", side, float(ep.wobbles))
+        add(prefix + "unwind_rate", side, ep.unwind_rate)
         if ep.engaged and ep.cmd_unwind_lead is not None:
             add(f"cmd_unwind_lead_{ep.side}", "model", ep.cmd_unwind_lead)
 
