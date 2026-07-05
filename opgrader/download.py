@@ -50,7 +50,7 @@ def load_jwt(explicit: str | None = None) -> str:
         return explicit
     if AUTH_FILE.exists():
         try:
-            tok = json.loads(AUTH_FILE.read_text()).get("access_token")
+            tok = json.loads(AUTH_FILE.read_text(encoding="utf-8")).get("access_token")
             if tok:
                 return tok
         except (json.JSONDecodeError, OSError) as e:

@@ -84,7 +84,7 @@ def _empty_store() -> dict:
 def load_store() -> dict:
     """Raw on-disk profile, version-guarded. Never raises."""
     try:
-        raw = json.loads(PROFILE_FILE.read_text())
+        raw = json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return _empty_store()
     if not isinstance(raw, dict) or raw.get("_version") != PROFILE_VERSION:
@@ -100,7 +100,7 @@ def load_store() -> dict:
 def save_store(store: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = PROFILE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(store, indent=2))
+    tmp.write_text(json.dumps(store, indent=2), encoding="utf-8")
     os.replace(tmp, PROFILE_FILE)
 
 

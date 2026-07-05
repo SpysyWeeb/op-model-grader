@@ -140,7 +140,7 @@ def parse_lfs_pointer(text: str) -> str | None:
 
 def _load_lookup_cache() -> dict:
     try:
-        data = json.loads(LOOKUP_CACHE_FILE.read_text())
+        data = json.loads(LOOKUP_CACHE_FILE.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
@@ -149,7 +149,7 @@ def _load_lookup_cache() -> dict:
 def _save_lookup_cache(cache: dict) -> None:
     try:
         LOOKUP_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LOOKUP_CACHE_FILE.write_text(json.dumps(cache, indent=1))
+        LOOKUP_CACHE_FILE.write_text(json.dumps(cache, indent=1), encoding="utf-8")
     except OSError:
         pass
 
@@ -223,7 +223,7 @@ def fetch_model_pointer(owner: str, repo: str, commit: str, session=None) -> dic
 
 def lookup_hash(sha256: str) -> dict | None:
     try:
-        table = json.loads(MODEL_HASHES_FILE.read_text())
+        table = json.loads(MODEL_HASHES_FILE.read_text(encoding="utf-8"))
         return table.get(sha256)
     except (OSError, json.JSONDecodeError):
         return None

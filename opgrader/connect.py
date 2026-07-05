@@ -36,7 +36,7 @@ class ApiError(RuntimeError):
 
 def read_jwt() -> str | None:
     try:
-        tok = json.loads(AUTH_FILE.read_text()).get("access_token")
+        tok = json.loads(AUTH_FILE.read_text(encoding="utf-8")).get("access_token")
         return tok or None
     except (OSError, json.JSONDecodeError):
         return None
@@ -49,7 +49,7 @@ def save_jwt(token: str) -> None:
         raise ApiError("that doesn't look like a JWT", status=400)
     data = {}
     try:
-        data = json.loads(AUTH_FILE.read_text())
+        data = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             data = {}
     except (OSError, json.JSONDecodeError):
@@ -61,7 +61,7 @@ def save_jwt(token: str) -> None:
 def clear_jwt() -> None:
     """Remove access_token from ~/.comma/auth.json, keeping any other keys."""
     try:
-        data = json.loads(AUTH_FILE.read_text())
+        data = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
     if not isinstance(data, dict) or "access_token" not in data:
@@ -74,7 +74,7 @@ def _write_auth(data: dict) -> None:
     AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = AUTH_FILE.with_suffix(".json.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, AUTH_FILE)
     os.chmod(AUTH_FILE, 0o600)

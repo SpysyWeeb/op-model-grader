@@ -24,7 +24,7 @@ PERSONALITIES = tuple(DEFAULT_T_FOLLOW)
 
 def load_config() -> dict:
     try:
-        data = json.loads(CONFIG_FILE.read_text())
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
@@ -33,7 +33,7 @@ def load_config() -> dict:
 def save_config(data: dict) -> None:
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2))
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, CONFIG_FILE)
 
 

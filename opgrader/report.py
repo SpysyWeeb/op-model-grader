@@ -896,8 +896,8 @@ def render_report(analysis, out_path: str | Path) -> Path:
                 events_by_kind[ev.kind].append(_event_payload(ev, da, t0_drive))
     payload_json = json.dumps({"events": events_by_kind}, separators=(",", ":"), allow_nan=False)
 
-    uplot_js = (_ASSETS / "uPlot.iife.min.js").read_text()
-    uplot_css = (_ASSETS / "uPlot.min.css").read_text()
+    uplot_js = (_ASSETS / "uPlot.iife.min.js").read_text(encoding="utf-8")
+    uplot_css = (_ASSETS / "uPlot.min.css").read_text(encoding="utf-8")
 
     group_sections = []
     for g in grades.groups:
@@ -1064,7 +1064,7 @@ const DATA = {payload_json};
 </body></html>"""
 
     out_path = Path(out_path)
-    out_path.write_text(html_doc)
+    out_path.write_text(html_doc, encoding="utf-8")
     return out_path
 
 
