@@ -261,6 +261,12 @@ class PingPongBin:
     engaged_rev: float | None = None  # reversals/min
     manual_rev: float | None = None
     score: float | None = None
+    # driver-profile pooling (see profile.py): set only when pooled history
+    # for this bin's speed label exists; None/0 means "not pooled", i.e.
+    # this bin is scored exactly as if profiling didn't exist
+    pooled_n: int = 0  # count of OTHER routes' pooled point-estimates
+    pooled_manual_rms: float | None = None  # combined (this-route + pooled) median
+    pooled_manual_rev: float | None = None
 
 
 @dataclass

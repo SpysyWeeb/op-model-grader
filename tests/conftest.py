@@ -90,3 +90,16 @@ def timebase():
         return np.arange(n) * DT
 
     return f
+
+
+@pytest.fixture(autouse=True)
+def _isolated_profile(tmp_path, monkeypatch):
+    """Every test gets its own driver-profile file. Without this, the whole
+    test suite would read/write the real ~/.local/share/opgrader/profile.json
+    on the machine running it -- persistent state leaking between test runs
+    (and polluting the developer's own real profile). Tests that specifically
+    exercise profile.py can still point PROFILE_FILE elsewhere themselves;
+    that just overrides this default."""
+    from opgrader import profile as P
+
+    monkeypatch.setattr(P, "PROFILE_FILE", tmp_path / "isolated-profile.json")

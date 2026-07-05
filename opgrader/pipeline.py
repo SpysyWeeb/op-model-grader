@@ -44,6 +44,7 @@ class Analysis:
     model_id: dict | None = None
     counterfactual: object | None = None  # counterfactual.Counterfactual
     speed_disagreement: object | None = None  # speed_disagreement.SpeedDisagreementResult
+    profile_summary: object | None = None  # profile.ProfileSummary
     grades: GradeReport | None = None
 
 
@@ -159,7 +160,11 @@ def _intent_event(w: IntentWindow) -> Event:
     )
 
 
-def analyze(per_drive: list[PerDrive], t_follow_targets: dict | None = None) -> Analysis:
+def analyze(
+    per_drive: list[PerDrive],
+    t_follow_targets: dict | None = None,
+    use_profile: bool = True,
+) -> Analysis:
     from .config import DEFAULT_T_FOLLOW
 
     an = Analysis(per_drive=per_drive)
@@ -213,6 +218,20 @@ def analyze(per_drive: list[PerDrive], t_follow_targets: dict | None = None) -> 
     an.adherence = _follow_adherence(per_drive)
     an.bucket_times = _bucket_times(per_drive)
 
+    # Driver profile: pool this fingerprint's accumulated manual-driving
+    # baseline into an.samples (driver side only, see profile.py) and
+    # upsert/persist this run's own per-route contribution. --no-profile
+    # skips both the read and the write.
+    profile_info: dict = {}
+    if use_profile:
+        from . import profile as P
+
+        an.profile_summary, profile_info = P.pool_for_grading(an, per_drive, pp_score)
+    else:
+        from .profile import ProfileSummary
+
+        an.profile_summary = ProfileSummary(used=False)
+
     # best-effort driving-model identification (cached; never blocks grading)
     try:
         from . import modelid
@@ -241,5 +260,6 @@ def analyze(per_drive: list[PerDrive], t_follow_targets: dict | None = None) -> 
         adherence=an.adherence,
         t_follow_targets=an.t_follow_targets,
         speed_disagreement_extra={"result": an.speed_disagreement} if an.speed_disagreement else None,
+        profile_info=profile_info,
     )
     return an

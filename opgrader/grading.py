@@ -198,10 +198,16 @@ def score_absolute(m: float, anchors: tuple[float, float, float]) -> float:
 class MetricResult:
     definition: MetricDef
     model_vals: list[float]
-    driver_vals: list[float]
+    driver_vals: list[float]  # COMBINED (this-run + pooled profile) driver samples
     model_agg: float | None = None
     driver_agg: float | None = None
     score: float | None = None
+    # driver-profile pooling provenance (see profile.py). Empty/None when
+    # profiling is off or this metric isn't poolable. driver_vals above is
+    # what actually feeds driver_agg/score; these fields exist purely so the
+    # report/CLI can show where the combined number came from.
+    driver_vals_this_drive: list[float] = field(default_factory=list)
+    same_drive_agg: float | None = None  # set only when this drive ALONE has >= MIN_EVENTS
 
     @property
     def n_model(self) -> int:
@@ -210,6 +216,14 @@ class MetricResult:
     @property
     def n_driver(self) -> int:
         return len(self.driver_vals)
+
+    @property
+    def n_this_drive(self) -> int:
+        return len(self.driver_vals_this_drive)
+
+    @property
+    def n_pooled(self) -> int:
+        return max(0, self.n_driver - self.n_this_drive)
 
 
 @dataclass
@@ -673,6 +687,7 @@ def grade(
     adherence: dict | None = None,
     t_follow_targets: dict | None = None,
     speed_disagreement_extra: dict | None = None,
+    profile_info: dict | None = None,
 ) -> GradeReport:
     cats: dict[str, CategoryResult] = {}
     for grp, weights in CATEGORY_GROUPS.items():
@@ -681,11 +696,25 @@ def grade(
 
     for mdef in METRICS:
         mv = [v for v in samples.get(mdef.key, {}).get("model", []) if np.isfinite(v)]
+        # dv is already the COMBINED (this-run + pooled-profile) list when a
+        # driver profile is in play -- profile.py mutates samples[...]
+        # ["driver"] in place before grade() runs, so MIN_EVENTS gating below
+        # naturally benefits from pooling with no changes needed here.
         dv = [v for v in samples.get(mdef.key, {}).get("driver", []) if np.isfinite(v)]
         res = MetricResult(mdef, mv, dv)
         res.model_agg = _aggregate(mv, mdef.agg)
         res.driver_agg = _aggregate(dv, mdef.agg)
         res.score = _score_metric(res)
+        info = (profile_info or {}).get(mdef.key)
+        if info is not None:
+            res.driver_vals_this_drive = list(info["this_drive"])
+            if len(info["this_drive"]) >= MIN_EVENTS:
+                res.same_drive_agg = _aggregate(info["this_drive"], mdef.agg)
+        else:
+            # profiling off, or this metric had no pooled contribution at
+            # all: "this drive" IS the whole (unpooled) combined list, so
+            # n_pooled correctly reads 0 rather than mistaking dv for pooled
+            res.driver_vals_this_drive = list(dv)
         cats[mdef.category].metrics.append(res)
 
     if adherence and t_follow_targets:
