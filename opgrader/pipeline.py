@@ -31,6 +31,11 @@ from .vehicle_model import vehicle_model_from_params
 PerDrive = tuple[Drive, Segmentation, DriveArrays, list[Event]]
 
 
+class MismatchError(RuntimeError):
+    """Raised by analyze() when asked to combine drives from different
+    vehicles or driving models without allow_mixed=True."""
+
+
 @dataclass
 class Analysis:
     per_drive: list[PerDrive]
@@ -46,7 +51,65 @@ class Analysis:
     counterfactual: object | None = None  # counterfactual.Counterfactual
     speed_disagreement: object | None = None  # speed_disagreement.SpeedDisagreementResult
     profile_summary: object | None = None  # profile.ProfileSummary
+    mismatch_warning: str | None = None  # set only when allow_mixed overrode a real mismatch
     grades: GradeReport | None = None
+
+
+def _resolve_model_identities(drives: list[Drive]) -> tuple[dict[str, dict], list[dict]]:
+    """Best-effort, cached, offline-safe model resolution -- computed ONCE
+    per unique (git_remote, git_commit, model_params) key and shared between
+    the mismatch gate below and the model_id display later in analyze().
+
+    Returns (drive.name -> modelid.resolve() result, distinct results in
+    first-seen order).
+    """
+    from . import modelid
+
+    seen: dict[tuple, dict] = {}
+    per_drive: dict[str, dict] = {}
+    for drive in drives:
+        key = (drive.meta.git_remote, drive.meta.git_commit,
+               tuple(sorted(drive.meta.model_params.items())))
+        if key not in seen:
+            seen[key] = modelid.resolve(drive.meta)
+        per_drive[drive.name] = seen[key]
+    return per_drive, list(seen.values())
+
+
+def _model_identity_key(result: dict | None) -> str | None:
+    """A comparable identity for a CONCLUSIVELY resolved model (modelid.
+    resolve() with provenance != "unknown"): sha256 when present, else the
+    label (a selector-param hit is conclusive even with no sha256). None
+    for an inconclusive resolution -- an unprovable case must never count
+    as a confirmed mismatch."""
+    if not result or result.get("provenance") == "unknown":
+        return None
+    sha = result.get("sha256")
+    return f"sha256:{sha}" if sha else f"label:{result.get('label')}"
+
+
+def _mismatch_message(drives: list[Drive], per_drive_ids: dict[str, dict]) -> str | None:
+    """A clear, actionable message naming the conflicting routes, or None
+    if the drives agree (or agreement can't be disproven)."""
+    by_fp: dict[str, str] = {}
+    for d in drives:
+        by_fp.setdefault(d.meta.car_fingerprint, d.name)
+    if len(by_fp) > 1:
+        detail = "; ".join(f"{name} is {fp}" for fp, name in by_fp.items())
+        return f"different vehicles in one combined grade: {detail}."
+
+    by_identity: dict[str, str] = {}  # identity key -> a representative drive name
+    labels: dict[str, str] = {}
+    for name, result in per_drive_ids.items():
+        key = _model_identity_key(result)
+        if key is None:
+            continue  # inconclusive: not a confirmed conflict either way
+        by_identity.setdefault(key, name)
+        labels[key] = result["label"]
+    if len(by_identity) > 1:
+        detail = "; ".join(f"{name} resolved to {labels[key]}" for key, name in by_identity.items())
+        return f"different driving models in one combined grade: {detail}."
+    return None
 
 
 def _follow_adherence(per_drive: list[PerDrive]) -> dict[str, dict]:
@@ -167,10 +230,33 @@ def analyze(
     per_drive: list[PerDrive],
     t_follow_targets: dict | None = None,
     use_profile: bool = True,
+    allow_mixed: bool = False,
 ) -> Analysis:
     from .config import DEFAULT_T_FOLLOW
 
+    drives = [d for d, _s, _a, _e in per_drive]
+
+    # Vehicle/model mismatch gate: reuses the same model-identity resolution
+    # the "driving model" header fact already computes (see model_id below)
+    # rather than resolving twice. car_fingerprint comparison can't
+    # reasonably fail (a plain string from carParams); model resolution is
+    # best-effort/cached and wrapped defensively so an unexpected hiccup
+    # there degrades to "don't block" rather than crashing the whole grade.
+    per_drive_ids: dict[str, dict] = {}
+    distinct_results: list[dict] = []
+    try:
+        per_drive_ids, distinct_results = _resolve_model_identities(drives)
+    except Exception:
+        pass
+    mismatch = _mismatch_message(drives, per_drive_ids)
+    if mismatch and not allow_mixed:
+        raise MismatchError(
+            mismatch + " Pass --allow-mixed to grade them together anyway "
+            "(the report will carry a prominent warning banner)."
+        )
+
     an = Analysis(per_drive=per_drive)
+    an.mismatch_warning = mismatch if mismatch else None
     an.t_follow_targets = dict(t_follow_targets or DEFAULT_T_FOLLOW)
     by_name = {}
     vms: dict[str, object] = {}
@@ -235,24 +321,16 @@ def analyze(
 
         an.profile_summary = ProfileSummary(used=False)
 
-    # best-effort driving-model identification (cached; never blocks grading)
-    try:
-        from . import modelid
-
-        seen: dict[tuple, dict] = {}
-        for drive, _s, _a, _e in per_drive:
-            key = (drive.meta.git_remote, drive.meta.git_commit,
-                   tuple(sorted(drive.meta.model_params.items())))
-            if key not in seen:
-                seen[key] = modelid.resolve(drive.meta)
-        results = list(seen.values())
-        an.model_id = results[0] if len(results) == 1 else {
-            "label": " / ".join(sorted({r["label"] for r in results})),
+    # driving-model identification: reuse the resolution already done for
+    # the mismatch gate above rather than resolving a second time.
+    an.model_id = distinct_results[0] if len(distinct_results) == 1 else (
+        {
+            "label": " / ".join(sorted({r["label"] for r in distinct_results})),
             "provenance": "multiple builds",
             "sha256": None,
         }
-    except Exception:
-        an.model_id = None
+        if distinct_results else None
+    )
 
     pp = an.pingpong
     an.grades = grade(

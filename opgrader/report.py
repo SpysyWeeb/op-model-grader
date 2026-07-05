@@ -927,6 +927,15 @@ def render_report(analysis, out_path: str | Path) -> Path:
 
     # ---- warnings
     warnings = []
+    mismatch_warning = getattr(analysis, "mismatch_warning", None)
+    if mismatch_warning:
+        # --allow-mixed overrode a real vehicle/model mismatch: this must be
+        # the FIRST warning and unmistakable, not just another bullet.
+        warnings.append(
+            f"MIXED VEHICLES/MODELS (--allow-mixed was used) — {mismatch_warning} "
+            "Results below may blend behavior from different cars or driving "
+            "models as if it were one and may not be meaningful."
+        )
     if all(d.meta.openpilot_long is False for d in drives):
         warnings.append(
             "openpilotLongitudinalControl is FALSE in these logs: while engaged, "
