@@ -110,8 +110,8 @@ Two top-level grades, each from weighted categories (empty ones are dropped
 and weights renormalized; overall = ½ longitudinal + ½ lateral):
 
 **Longitudinal**
-- **Smoothness** (0.30) — RMS/P95 jerk, accel reversals/min, % time |a|>2
-- **Following** (0.20) — median time gap, gap hunting, accel reversals in
+- **Smoothness** (0.25) — RMS/P95 jerk, accel reversals/min, % time |a|>2
+- **Following** (0.18) — median time gap, gap hunting, accel reversals in
   follow, and **follow-distance adherence**: the model's held gap (inverted
   from the long-MPC distance formula over steady-follow samples) vs the
   ACTIVE personality's target, scored absolutely (100 at ≤5% error, 50 at
@@ -119,10 +119,24 @@ and weights renormalized; overall = ½ longitudinal + ½ lateral):
   aggressive 1.25 / standard 1.45 / relaxed 1.75 s; set yours with
   `--t-follow aggressive=1.0,standard=1.45,relaxed=2.0`, the UI's target
   boxes, or `~/.config/opgrader/config.json`.
-- **Stopping** (0.20) — peak decel, decel timing, stop lurch (max |jerk| in the
+- **Stopping** (0.17) — peak decel, decel timing, stop lurch (max |jerk| in the
   last 2 s before standstill), accel at crawl speed
-- **Launch** (0.17) — time to 5 m/s, peak jerk
-- **Responsiveness** (0.13) — lead-decel response latency, pull-away latency
+- **Launch** (0.15) — time to 5 m/s, peak jerk
+- **Responsiveness** (0.10) — lead-decel response latency, pull-away latency
+- **Speed Disagreement** (0.15) — the moments you and the model wanted
+  different speeds. Pressing GAS while the model has longitudinal control
+  overrides it *without* disengaging (openpilot drops `longActive` but stays
+  enabled), so every press is a clean "I want more speed than this" label:
+  override episodes per 10 min, % of model-long time on the gas, and the
+  extra acceleration you demanded beyond the vision plan (aEgo − planned
+  accel). Scored on absolute anchors (rate 0/4/8 per 10 min → 100/50/0; time
+  0/10/25%; magnitude 0.2/1.0/2.0 m/s²) — there is no human baseline for
+  overriding yourself. Unscored extras: speed the model takes back after you
+  lift off, re-overrides within 15 s, brake-forced disengagements (the
+  opposite-direction disagreement) split lead-or-stop vs free-road, and a
+  context table per episode (launch / exp-slowdown / lead-pullaway /
+  free-road / other). Overriding only when you genuinely want more speed
+  keeps this grade honest — it measures your tolerance as much as the model.
 
 **Lateral**
 - **Ping-Pong** (0.40) — steering-wheel oscillation (angle minus its centered
