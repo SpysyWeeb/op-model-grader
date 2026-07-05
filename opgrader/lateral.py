@@ -202,18 +202,25 @@ def detect_turn_episodes(
                 ip_cmd = a + int(np.argmax(np.abs(cmd[a:b])))
                 ep.peak_cmd = float(cmd[ip_cmd])
                 # blinker-free "missed turn-in": the wheel turned sharply but
-                # the model's own commanded path never called for it at all
-                ep.never_commanded = bool(engaged and abs(ep.peak_cmd) < TURN_ONSET_DEG)
-                if abs(ep.peak_cmd) >= TURN_ONSET_DEG:
+                # the model's own commanded path never called for a turn in
+                # the SAME direction. Magnitude alone isn't enough here -- a
+                # large commanded excursion the OTHER way (e.g. the model
+                # wanted to go right while the driver forced a left turn) is
+                # not "commanding this turn", it's disagreeing with it, so
+                # use the signed peak in the actual turn's own direction.
+                same_dir_peak_cmd = float(np.max(sgn * cmd[a:b]))
+                ep.never_commanded = bool(engaged and same_dir_peak_cmd < TURN_ONSET_DEG)
+                if same_dir_peak_cmd >= TURN_ONSET_DEG:
                     # onset-phase lead: mirrors the unwind-phase lead below,
-                    # just at the first |cmd| >= 20 deg crossing (within this
-                    # episode's own window) instead of the fall to 50% of
-                    # peak; t_onset is already the first |act|-or-|cmd|
-                    # crossing that opened this episode, so this is simply
-                    # cmd's own crossing time minus that.
-                    ion_cmd = _first_idx((np.abs(cmd) >= TURN_ONSET_DEG)[:b], a)
+                    # just at the first same-direction |cmd| >= 20 deg
+                    # crossing (within this episode's own window) instead of
+                    # the fall to 50% of peak; t_onset is already the first
+                    # |act|-or-|cmd| crossing that opened this episode, so
+                    # this is simply cmd's own crossing time minus that.
+                    ion_cmd = _first_idx((sgn * cmd >= TURN_ONSET_DEG)[:b], a)
                     if ion_cmd is not None:
                         ep.cmd_onset_lead = float(t[ion_cmd] - t[a])
+                if abs(ep.peak_cmd) >= TURN_ONSET_DEG:
                     if iu_act is not None:
                         below_half_cmd = np.abs(cmd) <= UNWIND_FRACTION * abs(ep.peak_cmd)
                         iu_cmd = _first_idx(below_half_cmd[:end], ip_cmd + 1)
