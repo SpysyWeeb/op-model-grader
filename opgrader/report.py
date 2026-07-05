@@ -660,14 +660,20 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "turns build the baseline it's compared against.",
     ),
     "Turn-In Timing": (
-        "Blinker below 20 mph opens a turn-intent window. Turn-in delay is "
-        "blinker-to-steering time for turns the model executed; missed turn-ins are "
-        "windows where YOU had to start the turn (or it disengaged) — the 'it never "
-        "planned to turn' case.",
-        "Signal consistently a few seconds before low-speed turns, then give the "
-        "model a beat to act before rescuing it. Manual signaled turns (without "
-        "AOL/MADS steering) build the delay baseline; with always-on lateral there "
-        "may be none, so this grade leans on the missed-rate.",
+        "Blinker-free: every sharp low-speed turn is checked directly, signaled or "
+        "not, the same turn episodes Turn Execution uses. Cmd-vs-actual onset lead "
+        "compares when the model's own commanded path first called for the turn "
+        "against when the wheel actually got there — positive means the model "
+        "committed after the fact; missed turn-ins are engaged sharp turns where the "
+        "model's own plan never called for the turn at all, even though the wheel "
+        "turned sharply (a different, blinker-based 'Blinker turn intents' table "
+        "elsewhere in this report only covers turns you signaled below 20 mph — "
+        "that's a separate, unscored diagnostic, not this grade).",
+        "Any low-speed sharp turn counts, manual or model-driven, signaled or not — "
+        "more of them sharpens this grade. Contaminated turns (you pressing the "
+        "wheel before the peak) still count toward missed turn-ins — that's often "
+        "exactly why you had to press it — but are excluded from the onset-lead "
+        "timing itself, same as Turn Execution's unwind metrics.",
     ),
     "General Smoothness": (
         "Overall steering comfort at speed: RMS lateral jerk is side-to-side "
@@ -1039,8 +1045,14 @@ def render_report(analysis, out_path: str | Path) -> Path:
   sharp turn = peak ≥ 90° with onset speed &lt; 15 mph; positive angle = left (ISO). Commanded angle =
   VehicleModel(carParams).get_steer_from_curvature(−actuators.curvature, vEgo). Ping-pong = high-passed
   steering angle (minus centered 2 s mean), per speed bin, standstill and steeringPressed excluded.
-  Turn intents: blinker on below 20 mph opens a window (blinker-on + 20 s or blinker-off + 5 s);
-  |net heading| ≥ 45° = intersection turn, &lt; 20° = lane change, else ambiguous.</p>
+  <strong>Turn-In Timing is blinker-free</strong>: it scores the same turn episodes as Turn Execution
+  (every sharp turn ≥ 90°, signaled or not) — cmd-onset lead = the model's own commanded-angle 20°
+  crossing minus the actual angle's, missed turn-in = the model's commanded angle never reaching 20°
+  even though the wheel did. <strong>Turn intents</strong> (a separate, unscored diagnostic elsewhere in
+  this report, NOT used for Turn-In Timing's grade): blinker on below 20 mph opens a window (blinker-on
+  + 20 s or blinker-off + 5 s); |net heading| ≥ 45° = intersection turn, &lt; 20° = lane change, else
+  ambiguous — this population still feeds the separate Plan-vs-You counterfactual turn-in section, whose
+  definition of "missed"/"never planned" is blinker-gated and independent of the metric above.</p>
   <p class="muted">op-model-grader v{_esc(__version__)} · charts by <a href="https://github.com/leeoniya/uPlot">uPlot</a> (MIT, vendored)</p>
 </footer>
 </div>
