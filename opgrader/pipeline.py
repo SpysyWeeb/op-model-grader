@@ -37,7 +37,78 @@ class Analysis:
     intents: list[IntentWindow] = field(default_factory=list)
     pingpong: PingPongResult | None = None
     samples: dict = field(default_factory=dict)
+    bucket_samples: dict = field(default_factory=dict)
+    adherence: dict = field(default_factory=dict)  # personality -> stats
+    t_follow_targets: dict = field(default_factory=dict)
+    bucket_times: dict = field(default_factory=dict)  # bucket -> model-long seconds
+    model_id: dict | None = None
     grades: GradeReport | None = None
+
+
+def _follow_adherence(per_drive: list[PerDrive]) -> dict[str, dict]:
+    """Median effective t_follow per ACTIVE personality over steady-follow
+    samples (model-long active, vEgo > 8, lead present) inside detected
+    follow windows."""
+    from .metrics import effective_t_follow
+
+    by_p: dict[str, list] = {p: [] for p in ("aggressive", "standard", "relaxed")}
+    dt_by_p: dict[str, float] = {p: 0.0 for p in by_p}
+    for _drive, _seg, da, events in per_drive:
+        if da.d_rel is None or da.v_lead is None or da.personality is None:
+            continue
+        dt = float(np.median(np.diff(da.t))) if len(da.t) > 1 else 0.01
+        for ev in events:
+            if ev.kind != "follow" or not ev.engaged:
+                continue
+            sl = slice(ev.i0, ev.i1)
+            v = da.v[sl]
+            vl = da.v_lead[sl]
+            # steady-follow only: the MPC distance inversion assumes steady
+            # state, so drop approach/pull-away transients
+            mask = (
+                da.long_model[sl]
+                & (v > 8.0)
+                & (da.lead_status[sl] if da.lead_status is not None else True)
+                & (np.abs(vl - v) < 1.5)
+                & (np.abs(da.a[sl]) < 0.5)
+            )
+            if not mask.any():
+                continue
+            eff = effective_t_follow(v, vl, da.d_rel[sl])
+            pers = da.personality[sl]
+            for idx, name in ((0, "aggressive"), (1, "standard"), (2, "relaxed")):
+                m = mask & (pers == idx) & np.isfinite(eff)
+                if m.any():
+                    by_p[name].append(eff[m])
+                    dt_by_p[name] += float(m.sum()) * dt
+    out = {}
+    for name, chunks in by_p.items():
+        if chunks:
+            allv = np.concatenate(chunks)
+            out[name] = {
+                "median_eff": float(np.median(allv)),
+                "seconds": dt_by_p[name],
+                "n_samples": int(len(allv)),
+            }
+    return out
+
+
+def _bucket_times(per_drive: list[PerDrive]) -> dict[str, float]:
+    """Model-longitudinal seconds per mode and personality bucket."""
+    out = {b: 0.0 for b in ("chill", "experimental",
+                            "aggressive", "standard", "relaxed")}
+    for _drive, _seg, da, _events in per_drive:
+        if len(da.t) < 2:
+            continue
+        dt = np.clip(np.diff(da.t, append=da.t[-1]), 0.0, 0.05)
+        lm = da.long_model
+        if da.exp_mode is not None:
+            out["experimental"] += float(np.sum(dt[lm & da.exp_mode]))
+            out["chill"] += float(np.sum(dt[lm & ~da.exp_mode]))
+        if da.personality is not None:
+            for idx, name in ((0, "aggressive"), (1, "standard"), (2, "relaxed")):
+                out[name] += float(np.sum(dt[lm & (da.personality == idx)]))
+    return {k: v for k, v in out.items() if v >= 1.0}  # drop sub-second slivers
 
 
 def _turn_event(ep: TurnEpisode, da: DriveArrays) -> Event:
@@ -86,8 +157,11 @@ def _intent_event(w: IntentWindow) -> Event:
     )
 
 
-def analyze(per_drive: list[PerDrive]) -> Analysis:
+def analyze(per_drive: list[PerDrive], t_follow_targets: dict | None = None) -> Analysis:
+    from .config import DEFAULT_T_FOLLOW
+
     an = Analysis(per_drive=per_drive)
+    an.t_follow_targets = dict(t_follow_targets or DEFAULT_T_FOLLOW)
     by_name = {}
     for drive, seg, da, events in per_drive:
         by_name[drive.name] = events
@@ -110,13 +184,37 @@ def analyze(per_drive: list[PerDrive]) -> Analysis:
             if ev.drive in by_name:
                 by_name[ev.drive].append(ev)
 
-    an.samples = collect_samples(per_drive)
+    an.samples, an.bucket_samples = collect_samples(per_drive)
     add_turn_samples(an.samples, an.turns, an.intents)
+    an.adherence = _follow_adherence(per_drive)
+    an.bucket_times = _bucket_times(per_drive)
+
+    # best-effort driving-model identification (cached; never blocks grading)
+    try:
+        from . import modelid
+
+        seen: dict[tuple, dict] = {}
+        for drive, _s, _a, _e in per_drive:
+            key = (drive.meta.git_remote, drive.meta.git_commit,
+                   tuple(sorted(drive.meta.model_params.items())))
+            if key not in seen:
+                seen[key] = modelid.resolve(drive.meta)
+        results = list(seen.values())
+        an.model_id = results[0] if len(results) == 1 else {
+            "label": " / ".join(sorted({r["label"] for r in results})),
+            "provenance": "multiple builds",
+            "sha256": None,
+        }
+    except Exception:
+        an.model_id = None
 
     pp = an.pingpong
     an.grades = grade(
         an.samples,
         pingpong_score=pp.score if pp else None,
         pingpong_extra={"bins": pp.bins, "sub_bins": pp.sub_bins, "worst": pp.worst_bin} if pp else None,
+        bucket_samples=an.bucket_samples,
+        adherence=an.adherence,
+        t_follow_targets=an.t_follow_targets,
     )
     return an

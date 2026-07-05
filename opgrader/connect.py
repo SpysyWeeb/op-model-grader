@@ -292,7 +292,8 @@ def _slug(parts: list[str]) -> str:
     return re.sub(r"[^\w.-]+", "-", text).strip("-") or "drive"
 
 
-def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str | None):
+def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str | None,
+                  t_follow_targets: dict | None = None):
     """Download missing rlogs, run the pipeline, write the report.
 
     Meant to run in a background thread; never raises (failures land in the
@@ -367,7 +368,11 @@ def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str
             raise ApiError("no usable drives decoded from the inputs", status=400)
 
         job.update(phase="grading", detail="detecting maneuvers and scoring", progress=None)
-        analysis = analyze(per_drive)
+        if t_follow_targets is None:
+            from .config import get_t_follow
+
+            t_follow_targets = get_t_follow()
+        analysis = analyze(per_drive, t_follow_targets=t_follow_targets)
 
         job.update(phase="rendering", detail="writing report")
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)

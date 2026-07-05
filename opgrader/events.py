@@ -64,6 +64,8 @@ class DriveArrays:
     enabled: np.ndarray  # bool (single flag, reference only)
     lat_model: np.ndarray  # bool: model steering (AOL/MADS aware)
     long_model: np.ndarray  # bool: model gas/brake
+    exp_mode: np.ndarray | None  # bool: experimental mode active (None if unknown)
+    personality: np.ndarray | None  # int: 0 aggressive / 1 standard / 2 relaxed
     standstill: np.ndarray | None
     steering_angle: np.ndarray | None  # deg, positive = LEFT (ISO)
     cmd_angle: np.ndarray | None  # commanded steering angle via VehicleModel, deg
@@ -147,6 +149,12 @@ def build_arrays(drive: Drive, seg: Segmentation) -> DriveArrays:
         enabled=seg.enabled,
         lat_model=seg.lat_model,
         long_model=seg.long_model,
+        exp_mode=b("experimentalMode"),
+        personality=(
+            hold_align(drive.ch("personality"), t, default=-1).astype(np.int16)
+            if drive.ch("personality") is not None
+            else None
+        ),
         standstill=b("standstill"),
         steering_angle=f("steeringAngleDeg"),
         cmd_angle=cmd_angle,
@@ -185,6 +193,32 @@ def _runs_min_dur(t, mask, min_dur):
 
 MIXED_CONTROL_TOLERANCE = 0.10  # <10% of samples may disagree with the tag
 
+PERSONALITY_NAMES = {0: "aggressive", 1: "standard", 2: "relaxed"}
+
+
+def mode_tag(exp_mode: np.ndarray | None, i0: int, i1: int) -> str:
+    """"experimental"/"chill" with the 90% constancy rule, else "mixed"."""
+    if exp_mode is None or i1 <= i0:
+        return "unknown"
+    frac = float(np.mean(exp_mode[i0:i1]))
+    if frac >= 1.0 - MIXED_CONTROL_TOLERANCE:
+        return "experimental"
+    if frac <= MIXED_CONTROL_TOLERANCE:
+        return "chill"
+    return "mixed"
+
+
+def personality_tag(personality: np.ndarray | None, i0: int, i1: int) -> str:
+    """Dominant (>=90%) personality name, "mixed" on a mid-window flip."""
+    if personality is None or i1 <= i0:
+        return "unknown"
+    window = personality[i0:i1]
+    vals, counts = np.unique(window, return_counts=True)
+    top = int(vals[np.argmax(counts)])
+    if counts.max() / len(window) < 1.0 - MIXED_CONTROL_TOLERANCE:
+        return "mixed"
+    return PERSONALITY_NAMES.get(top, "unknown")
+
 
 def axis_tag(flag: np.ndarray, i0: int, i1: int) -> bool | None:
     """Engaged/manual tag for a window, or None if control is mixed."""
@@ -206,6 +240,9 @@ def _mk_event(
     engaged = axis_tag(da.long_model, i0, i1)
     if engaged is None:
         return None
+    values = dict(values)
+    values["mode"] = mode_tag(da.exp_mode, i0, i1)
+    values["personality"] = personality_tag(da.personality, i0, i1)
     return Event(
         kind=kind,
         engaged=engaged,
@@ -215,7 +252,7 @@ def _mk_event(
         i0=i0,
         i1=i1,
         has_override=bool(da.long_override[i0:i1].any()),
-        values=dict(values),
+        values=values,
     )
 
 

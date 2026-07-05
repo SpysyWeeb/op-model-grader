@@ -283,6 +283,85 @@ def _pingpong_card(cat: CategoryResult) -> str:
   category score is the engaged-time-weighted mean of bin scores.</p>"""
 
 
+def _breakdown_tables(breakdowns: dict) -> str:
+    """Per-mode and per-personality longitudinal sub-tables.
+
+    Columns = buckets; rows = metrics (grouped by category). Cells show the
+    bucket's model aggregate with its sample count and score; buckets keep
+    the n>=3 gate ("--" = insufficient data in that bucket)."""
+    if not breakdowns:
+        return ""
+    out = []
+    for dim, title in (("mode", "By mode (Chill / Experimental)"),
+                       ("personality", "By personality")):
+        bg = breakdowns.get(dim) or {}
+        if not bg:
+            continue
+        buckets = list(bg)
+        heads = "".join(f"<th>{_esc(b)}</th>" for b in buckets)
+        grade_cells = "".join(
+            f"<td><strong>{_esc(bg[b].letter or '–')}</strong>"
+            + (f" <span class='muted'>{bg[b].score:.0f}</span>" if bg[b].score is not None else "")
+            + "</td>"
+            for b in buckets
+        )
+        rows = [f'<tr><td><strong>Longitudinal grade</strong></td><td></td>{grade_cells}</tr>']
+        # metric rows grouped by category (same order as the bucket results)
+        first = bg[buckets[0]]
+        for ci, cat in enumerate(first.categories):
+            cat_grades = []
+            for b in buckets:
+                c = bg[b].categories[ci]
+                cat_grades.append(
+                    f"<td>{_esc(c.letter or '–')}"
+                    + (f" <span class='muted'>{c.score:.0f}</span>" if c.score is not None else "")
+                    + "</td>"
+                )
+            rows.append(
+                f'<tr class="bdcat"><td>{_esc(cat.name)}</td><td></td>{"".join(cat_grades)}</tr>'
+            )
+            for mi, m0 in enumerate(cat.metrics):
+                if all(bg[b].categories[ci].metrics[mi].n_model == 0 for b in buckets):
+                    continue
+                d = m0.definition
+                cells = []
+                for b in buckets:
+                    mres = bg[b].categories[ci].metrics[mi]
+                    if mres.n_model == 0:
+                        cells.append('<td class="muted">–</td>')
+                    elif mres.score is None:
+                        cells.append(
+                            f'<td class="muted">{_fmt(mres.model_agg)} '
+                            f'<span class="muted">(n={mres.n_model})</span></td>'
+                        )
+                    else:
+                        cells.append(
+                            f"<td>{_fmt(mres.model_agg)} "
+                            f'<span class="muted">(n={mres.n_model})</span> → {mres.score:.0f}</td>'
+                        )
+                you = _fmt(m0.driver_agg)
+                rows.append(
+                    f'<tr><td class="bdmetric">{_esc(d.label)}'
+                    f'{(" (" + _esc(d.unit) + ")") if d.unit else ""}</td>'
+                    f"<td>{you}</td>{''.join(cells)}</tr>"
+                )
+        out.append(f"""
+<div class="card" style="overflow-x:auto">
+  <h3>{_esc(title)}</h3>
+  <table class="mtable">
+    <thead><tr><th>Metric</th><th>You</th>{heads}</tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+</div>""")
+    if not out:
+        return ""
+    return f"""
+<section>
+  <h2>Longitudinal breakdowns <span class="muted">same human baseline; mixed-mode events excluded</span></h2>
+  {''.join(out)}
+</section>"""
+
+
 def _grade_class(score) -> str:
     if score is None:
         return "gnone"
@@ -304,6 +383,15 @@ def _category_card(cat: CategoryResult) -> str:
     <thead><tr><th>Metric</th><th>Model</th><th>You</th><th>Unit</th><th>Score</th></tr></thead>
     <tbody>{_metric_rows(cat.metrics)}</tbody>
   </table>"""
+        tf = cat.extra.get("t_follow_targets") if cat.extra else None
+        if tf:
+            tgt = ", ".join(f"{p} {tf[p]:.2f} s" for p in ("aggressive", "standard", "relaxed") if p in tf)
+            body += (
+                f'<p class="muted">Follow-adherence rows compare the model\'s held gap to the '
+                f'ACTIVE personality\'s target (the "You" column is the target, not the human). '
+                f'Targets used: {_esc(tgt)} — these are fork-dependent; set yours with '
+                f'--t-follow or the UI.</p>'
+            )
     return f"""
 <div class="card {_grade_class(cat.score)}">
   <div class="cathead"><h3>{_esc(cat.name)}</h3>
@@ -314,7 +402,12 @@ def _category_card(cat: CategoryResult) -> str:
 </div>"""
 
 
-def _header_facts(drives, buckets) -> list[tuple[str, str]]:
+def _fmt_bucket_times(bucket_times: dict, names: tuple) -> str:
+    parts = [f"{n} {bucket_times[n] / 60:.1f} min" for n in names if n in bucket_times]
+    return ", ".join(parts)
+
+
+def _header_facts(drives, buckets, analysis=None) -> list[tuple[str, str]]:
     routes = [d.name for d in drives]
     fingerprints = sorted({d.meta.car_fingerprint for d in drives})
     versions = sorted({d.meta.version for d in drives if d.meta.version})
@@ -334,7 +427,23 @@ def _header_facts(drives, buckets) -> list[tuple[str, str]]:
         t0, t1 = min(dates), max(dates)
         fmt = lambda ts: time.strftime("%Y-%m-%d", time.gmtime(ts))
         facts.insert(1, ("Dates", fmt(t0) if fmt(t0) == fmt(t1) else f"{fmt(t0)} – {fmt(t1)}"))
-    if any(d.meta.experimental_mode for d in drives):
+    if analysis is not None:
+        bt = getattr(analysis, "bucket_times", {}) or {}
+        modes = _fmt_bucket_times(bt, ("chill", "experimental"))
+        if modes:
+            facts.append(("Time in mode (model long)", modes))
+        pers = _fmt_bucket_times(bt, ("aggressive", "standard", "relaxed"))
+        if pers:
+            facts.append(("Time in personality (model long)", pers))
+        mid = getattr(analysis, "model_id", None)
+        if mid:
+            label = mid["label"]
+            if mid.get("provenance") not in (None, "unknown"):
+                label += f" — {mid['provenance']}"
+            facts.append(("Driving model", label))
+    if any(d.meta.experimental_mode for d in drives) and (
+        analysis is None or "experimental" not in (getattr(analysis, "bucket_times", {}) or {})
+    ):
         facts.append(("Experimental mode", "seen enabled during these drives"))
     return facts
 
@@ -480,7 +589,7 @@ def render_report(analysis, out_path: str | Path) -> Path:
     )
     facts_html = "".join(
         f'<div class="fact"><span class="fk">{_esc(k)}</span><span class="fv">{_esc(v)}</span></div>'
-        for k, v in _header_facts(drives, buckets)
+        for k, v in _header_facts(drives, buckets, analysis)
     )
 
     html_doc = f"""<!DOCTYPE html>
@@ -503,6 +612,8 @@ def render_report(analysis, out_path: str | Path) -> Path:
 {_group_hero(grades)}
 
 {''.join(group_sections)}
+
+{_breakdown_tables(grades.breakdowns)}
 
 <section>
   <h2>Distributions</h2>
@@ -530,6 +641,15 @@ def render_report(analysis, out_path: str | Path) -> Path:
   for ≥ 0.4 s; response = own smoothed accel drops 0.3 m/s² (≤ 4 s, censored).
   Pull-away: lead &lt; 12 m from standstill, vLead &gt; 0.5 m/s; go = vEgo &gt; 0.15 or aEgo &gt; 0.2 (≤ 6 s).
   Engaged moments with gas/brake override are excluded from the model side.</p>
+  <p><strong>Mode &amp; personality.</strong> Experimental/chill mode and the longitudinal
+  personality are tracked per sample (they change mid-drive). Events keep their tag only when
+  ≥90% of the window agrees; mixed events count toward the overall grades but are excluded
+  from the breakdown buckets. Breakdown buckets are scored against the same human baseline
+  with the usual ≥3-events gate. <strong>Follow adherence</strong> inverts the openpilot long-MPC
+  distance: t_follow = (dRel − 6.0 − (vEgo² − vLead²)/5.0) / vEgo over steady-follow samples
+  (model long active, vEgo &gt; 8, lead present, |vRel| &lt; 1.5 m/s, |aEgo| &lt; 0.5 m/s²); the median per ACTIVE personality is compared
+  to that personality's target and scored absolutely (100 at ≤5% error, 50 at 25%, 0 at ≥50%).
+  Targets are fork-dependent.</p>
   <p><strong>Per-axis attribution (AOL/MADS aware).</strong> Longitudinal metrics attribute by
   carControl.longActive, lateral metrics by carControl.latActive — so Always-On-Lateral time counts
   as the model for steering and as you for gas/brake. Events whose window has mixed control
@@ -616,6 +736,8 @@ th{text-align:left;color:var(--muted);font-weight:500;border-bottom:1px solid va
 td{padding:4px 8px 4px 0;border-bottom:1px solid var(--grid);font-variant-numeric:tabular-nums}
 tr:last-child td{border-bottom:none}
 tr.insuff td{color:var(--muted)}
+tr.bdcat td{color:var(--ink2);font-weight:600;border-top:2px solid var(--grid)}
+td.bdmetric{padding-left:14px}
 .hists{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
 .histbox{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
 .legend{color:var(--ink2);font-size:.85em;margin:6px 0}

@@ -208,3 +208,33 @@ def lateral_metrics(
         out["rms_lat_jerk"] = rms(derivative(t, lat_s))
         out["pct_high_lat"] = pct_time_above(t, np.abs(lat_accel), 3.0)
     return out
+
+
+# ---------------------------------------------------- follow-distance target
+
+STOP_DISTANCE = 6.0  # m, openpilot long MPC
+COMFORT_BRAKE = 2.5  # m/s^2, openpilot long MPC
+
+
+def effective_t_follow(
+    v_ego: np.ndarray, v_lead: np.ndarray, d_rel: np.ndarray
+) -> np.ndarray:
+    """Invert the openpilot long-MPC steady-state follow distance.
+
+    desired_dist = t_follow*v_ego + STOP_DISTANCE + (v_ego^2 - v_lead^2)/(2*COMFORT_BRAKE)
+    =>  t_follow = (d_rel - STOP_DISTANCE - (v_ego^2 - v_lead^2)/(2*COMFORT_BRAKE)) / v_ego
+
+    Only meaningful at steady follow with v_ego well above zero; callers must
+    mask accordingly (NaN is returned where v_ego <= 0.5).
+    """
+    v_ego = np.asarray(v_ego, dtype=np.float64)
+    v_lead = np.asarray(v_lead, dtype=np.float64)
+    d_rel = np.asarray(d_rel, dtype=np.float64)
+    out = np.full(v_ego.shape, np.nan)
+    ok = v_ego > 0.5
+    out[ok] = (
+        d_rel[ok]
+        - STOP_DISTANCE
+        - (np.square(v_ego[ok]) - np.square(v_lead[ok])) / (2.0 * COMFORT_BRAKE)
+    ) / v_ego[ok]
+    return out

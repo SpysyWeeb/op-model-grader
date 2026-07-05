@@ -37,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="download a route from comma connect (repeatable)",
     )
     p.add_argument("--jwt", help="comma API JWT (default: ~/.comma/auth.json)")
+    p.add_argument(
+        "--t-follow",
+        metavar="P=SECONDS,...",
+        help="fork follow targets, e.g. aggressive=1.0,standard=1.45,relaxed=2.0 "
+        "(default: ~/.config/opgrader/config.json, else stock openpilot)",
+    )
     p.add_argument("-o", "--out", default="report.html", help="output HTML path")
     p.add_argument("--open", action="store_true", help="open the report in a browser")
     p.add_argument(
@@ -50,6 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    from .config import resolve_t_follow
+
+    try:
+        t_follow = resolve_t_follow(args.t_follow)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     if args.ui:
         if args.logs or args.route:
@@ -110,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no usable drives decoded", file=sys.stderr)
         return 1
 
-    analysis = analyze(per_drive)
+    analysis = analyze(per_drive, t_follow_targets=t_follow)
     grades = analysis.grades
 
     for _d, _s, _a, events in per_drive:
@@ -124,6 +138,28 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     out = render_report(analysis, args.out)
+    if analysis.model_id and analysis.model_id.get("provenance") != "unknown":
+        print(f"driving model: {analysis.model_id['label']} ({analysis.model_id['provenance']})")
+    if analysis.bucket_times:
+        bt = analysis.bucket_times
+        chips = ", ".join(f"{k} {v / 60:.1f}m" for k, v in bt.items())
+        print(f"model-long time by bucket: {chips}")
+    for p, info in sorted(analysis.adherence.items()):
+        tgt = analysis.t_follow_targets.get(p)
+        if tgt and info["seconds"] >= 1.0:
+            pct = abs(info["median_eff"] - tgt) / tgt * 100
+            print(
+                f"follow adherence ({p}): holds {info['median_eff']:.2f}s vs "
+                f"{tgt:.2f}s target ({pct:.0f}% off, {info['seconds']:.0f}s of data)"
+            )
+    for dim in ("mode", "personality"):
+        bg = grades.breakdowns.get(dim) or {}
+        scored = {b: g for b, g in bg.items() if g.score is not None}
+        if scored:
+            print(
+                f"longitudinal by {dim}: "
+                + ", ".join(f"{b} {g.letter} ({g.score:.0f})" for b, g in scored.items())
+            )
     for g in grades.groups:
         if g.score is not None:
             print(f"{g.name.lower()}: {g.letter} ({g.score:.1f}/100)")

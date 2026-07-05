@@ -35,11 +35,18 @@ import numpy as np
 from . import metrics as M
 from .events import DriveArrays, Event
 from .extract import Drive
-from .segments import Segmentation
+from .segments import Segmentation, _contiguous_runs
 
 MIN_EVENTS = 3
 
 GROUP_WEIGHTS = {"Longitudinal": 0.5, "Lateral": 0.5}
+
+# longitudinal breakdown buckets (mode and personality tracked separately);
+# events tagged "mixed"/"unknown" stay in the overall grade but are excluded
+# from every bucket
+MODE_BUCKETS = ("chill", "experimental")
+PERSONALITY_BUCKETS = ("aggressive", "standard", "relaxed")
+ALL_BUCKETS = MODE_BUCKETS + PERSONALITY_BUCKETS
 
 CATEGORY_GROUPS = {
     "Longitudinal": {
@@ -228,10 +235,25 @@ class GroupResult:
 
 
 @dataclass
+class BucketGrade:
+    """Longitudinal grades for one mode/personality breakdown bucket."""
+
+    bucket: str
+    categories: list[CategoryResult]
+    score: float | None
+
+    @property
+    def letter(self) -> str | None:
+        return letter(self.score) if self.score is not None else None
+
+
+@dataclass
 class GradeReport:
     groups: list[GroupResult]
     overall_score: float | None
     overall_letter: str | None
+    # {"mode": {bucket: BucketGrade}, "personality": {...}} for Longitudinal
+    breakdowns: dict = field(default_factory=dict)
 
     @property
     def categories(self) -> list[CategoryResult]:
@@ -241,9 +263,19 @@ class GradeReport:
 # --------------------------------------------------------------- collection
 
 
+def _event_buckets(ev: Event) -> tuple[str, ...]:
+    """Breakdown buckets an engaged-long event contributes to."""
+    out = []
+    if ev.values.get("mode") in MODE_BUCKETS:
+        out.append(ev.values["mode"])
+    if ev.values.get("personality") in PERSONALITY_BUCKETS:
+        out.append(ev.values["personality"])
+    return tuple(out)
+
+
 def collect_samples(
     per_drive: list[tuple[Drive, Segmentation, DriveArrays, list[Event]]],
-) -> dict[str, dict[str, list[float]]]:
+) -> tuple[dict[str, dict[str, list[float]]], dict[str, dict[str, list[float]]]]:
     """Per-metric sample lists for span- and longitudinal-event metrics.
 
     Model samples come from engaged spans/events; events contaminated by a
@@ -253,10 +285,16 @@ def collect_samples(
     samples: dict[str, dict[str, list[float]]] = {
         m.key: {"model": [], "driver": []} for m in METRICS
     }
+    bucket_samples: dict[str, dict[str, list[float]]] = {
+        m.key: {b: [] for b in ALL_BUCKETS} for m in METRICS
+    }
 
-    def add(key: str, side: str, value) -> None:
+    def add(key: str, side: str, value, buckets: tuple[str, ...] = ()) -> None:
         if value is not None and np.isfinite(value):
             samples[key][side].append(float(value))
+            if side == "model":
+                for b in buckets:
+                    bucket_samples[key][b].append(float(value))
 
     for drive, seg, da, events in per_drive:
         # ---- longitudinal span-based (attributed by who controls gas/brake)
@@ -274,6 +312,43 @@ def collect_samples(
             add("p95_jerk", side, M.p95_abs(j[keep]))
             add("accel_reversals", side, M.sign_reversals_per_min(t, a_s))
             add("pct_hard_accel", side, M.pct_time_above(t[keep], np.abs(da.a[sl][keep]), 2.0))
+
+            # per-bucket smoothness samples (model side only): mask the span
+            # by the mode / personality active at each sample, so mid-span
+            # hot-swaps attribute samples to the right bucket
+            if side == "model":
+                span_buckets = []
+                if da.exp_mode is not None:
+                    exp = da.exp_mode[sl]
+                    span_buckets += [("experimental", exp), ("chill", ~exp)]
+                if da.personality is not None:
+                    pers = da.personality[sl]
+                    span_buckets += [
+                        (name, pers == idx)
+                        for idx, name in ((0, "aggressive"), (1, "standard"), (2, "relaxed"))
+                    ]
+                for bname, bmask in span_buckets:
+                    m2 = keep & bmask
+                    if m2.sum() < 500:  # ~5 s at 100 Hz
+                        continue
+                    bucket_samples["rms_jerk"][bname].append(float(M.rms(j[m2])))
+                    bucket_samples["p95_jerk"][bname].append(float(M.p95_abs(j[m2])))
+                    # reversal rate per contiguous chunk of the bucket mask so
+                    # the time between chunks doesn't dilute the rate
+                    count, dur = 0.0, 0.0
+                    for a2, b2 in _contiguous_runs(m2):
+                        if b2 - a2 < 100:  # ignore sub-second slivers
+                            continue
+                        d2 = float(t[b2 - 1] - t[a2])
+                        rate = M.sign_reversals_per_min(t[a2:b2], a_s[a2:b2])
+                        if np.isfinite(rate) and d2 > 0:
+                            count += rate * d2 / 60.0
+                            dur += d2
+                    if dur > 0:
+                        bucket_samples["accel_reversals"][bname].append(60.0 * count / dur)
+                    pct = M.pct_time_above(t[m2], np.abs(da.a[sl][m2]), 2.0)
+                    if np.isfinite(pct):
+                        bucket_samples["pct_hard_accel"][bname].append(float(pct))
 
         # ---- lateral span-based (attributed by who steers; AOL time = model)
         for span in seg.lat_spans:
@@ -299,32 +374,33 @@ def collect_samples(
             side = "model" if ev.engaged else "driver"
             if ev.engaged and ev.has_override:
                 continue
+            bk = _event_buckets(ev) if ev.engaged else ()
             sl = slice(ev.i0, ev.i1)
             t, v, a = da.t[sl], da.v[sl], da.a[sl]
             if ev.kind == "stop":
                 sm = M.stop_metrics(t, v, a, ev.values.get("t_standstill"))
-                add("peak_decel", side, sm["peak_decel"])
-                add("peak_decel_frac", side, sm["peak_decel_frac"])
-                add("stop_lurch", side, sm["stop_lurch"])
-                add("accel_at_crawl", side, sm["accel_at_crawl"])
+                add("peak_decel", side, sm["peak_decel"], bk)
+                add("peak_decel_frac", side, sm["peak_decel_frac"], bk)
+                add("stop_lurch", side, sm["stop_lurch"], bk)
+                add("accel_at_crawl", side, sm["accel_at_crawl"], bk)
                 ev.values.update(sm)
             elif ev.kind == "launch":
                 lm = M.launch_metrics(t, v, a, ev.values["t_first_motion"])
-                add("time_to_5", side, lm["time_to_5"])
-                add("launch_peak_jerk", side, lm["peak_jerk"])
+                add("time_to_5", side, lm["time_to_5"], bk)
+                add("launch_peak_jerk", side, lm["peak_jerk"], bk)
                 ev.values.update(lm)
             elif ev.kind == "follow":
                 fm = M.follow_metrics(t, v, a, da.d_rel[sl])
-                add("median_gap", side, fm["median_gap"])
-                add("gap_hunting", side, fm["gap_hunting"])
-                add("follow_reversals", side, fm["accel_reversals"])
+                add("median_gap", side, fm["median_gap"], bk)
+                add("gap_hunting", side, fm["gap_hunting"], bk)
+                add("follow_reversals", side, fm["accel_reversals"], bk)
                 ev.values.update(fm)
             elif ev.kind == "lead_decel":
-                add("lead_decel_latency", side, ev.values["latency"])
+                add("lead_decel_latency", side, ev.values["latency"], bk)
             elif ev.kind == "pullaway":
-                add("pullaway_latency", side, ev.values["latency"])
+                add("pullaway_latency", side, ev.values["latency"], bk)
 
-    return samples
+    return samples, bucket_samples
 
 
 def add_turn_samples(samples: dict, turns, intents) -> None:
@@ -400,10 +476,98 @@ def _score_metric(res: MetricResult) -> float | None:
     return score_ratio(res.model_agg, res.driver_agg, d.better, d.eps)
 
 
+ADHERENCE_MIN_SECONDS = 30.0
+ADHERENCE_ANCHORS = (5.0, 25.0, 50.0)  # % error at score 100 / 50 / 0
+
+
+def adherence_results(
+    adherence: dict[str, dict], targets: dict[str, float]
+) -> list[MetricResult]:
+    """One Following row per personality with steady-follow data.
+
+    Model column = median effective t_follow the model actually held;
+    "You" column = that personality's TARGET (fork-dependent), not the human.
+    Scored absolutely on % error: 100 at <=5%, 50 at 25%, 0 at >=50%.
+    """
+    out: list[MetricResult] = []
+    for p in PERSONALITY_BUCKETS:
+        info = adherence.get(p)
+        if not info or not np.isfinite(info.get("median_eff", float("nan"))):
+            continue
+        target = float(targets.get(p, 0.0)) or 1.0
+        med = float(info["median_eff"])
+        secs = float(info.get("seconds", 0.0))
+        pct = abs(med - target) / target * 100.0
+        enough = secs >= ADHERENCE_MIN_SECONDS
+        d = MetricDef(
+            key=f"follow_adherence_{p}",
+            label=f"Follow adherence ({p})",
+            category="Following",
+            unit="s",
+            scorer="abs" if enough else "none",
+            abs_anchors=ADHERENCE_ANCHORS,
+            needs_driver=False,
+            note=(
+                f"holds {med:.2f} s vs {target:.2f} s target, {pct:.0f}% off "
+                f"({secs:.0f} s of steady follow)"
+                + ("" if enough else f" — need {ADHERENCE_MIN_SECONDS:.0f} s to score")
+            ),
+        )
+        r = MetricResult(d, [med], [])
+        r.model_agg = med
+        r.driver_agg = target  # displayed in the "You" column as the target
+        if enough:
+            r.score = score_absolute(pct, ADHERENCE_ANCHORS)
+        out.append(r)
+    return out
+
+
+def grade_breakdowns(
+    samples: dict, bucket_samples: dict
+) -> dict[str, dict[str, BucketGrade]]:
+    """Longitudinal grades per mode and per personality bucket.
+
+    Bucket model samples are scored against the SAME overall human baseline;
+    metrics gate at n>=3 per bucket like everywhere else.
+    """
+    weights = CATEGORY_GROUPS["Longitudinal"]
+    long_defs = [m for m in METRICS if m.category in weights]
+    out: dict[str, dict[str, BucketGrade]] = {"mode": {}, "personality": {}}
+    for group_name, buckets in (("mode", MODE_BUCKETS), ("personality", PERSONALITY_BUCKETS)):
+        for b in buckets:
+            cats = {c: CategoryResult(c, w) for c, w in weights.items()}
+            any_data = False
+            for mdef in long_defs:
+                mv = [v for v in bucket_samples.get(mdef.key, {}).get(b, []) if np.isfinite(v)]
+                dv = [v for v in samples.get(mdef.key, {}).get("driver", []) if np.isfinite(v)]
+                res = MetricResult(mdef, mv, dv)
+                res.model_agg = _aggregate(mv, mdef.agg)
+                res.driver_agg = _aggregate(dv, mdef.agg)
+                res.score = _score_metric(res)
+                if mv:
+                    any_data = True
+                cats[mdef.category].metrics.append(res)
+            if not any_data:
+                continue
+            for cat in cats.values():
+                scored = [m.score for m in cat.metrics if m.score is not None]
+                cat.score = float(np.mean(scored)) if scored else None
+            valid = [(c, weights[c.name]) for c in cats.values() if c.score is not None]
+            score = (
+                sum(c.score * w for c, w in valid) / sum(w for _c, w in valid)
+                if valid else None
+            )
+            out[group_name][b] = BucketGrade(b, list(cats.values()), score)
+    return out
+
+
 def grade(
     samples: dict[str, dict[str, list[float]]],
     pingpong_score: float | None = None,
     pingpong_extra: dict | None = None,
+    bucket_samples: dict | None = None,
+    adherence: dict | None = None,
+    t_follow_targets: dict | None = None,
 ) -> GradeReport:
     cats: dict[str, CategoryResult] = {}
     for grp, weights in CATEGORY_GROUPS.items():
@@ -418,6 +582,10 @@ def grade(
         res.driver_agg = _aggregate(dv, mdef.agg)
         res.score = _score_metric(res)
         cats[mdef.category].metrics.append(res)
+
+    if adherence and t_follow_targets:
+        cats["Following"].metrics.extend(adherence_results(adherence, t_follow_targets))
+        cats["Following"].extra["t_follow_targets"] = dict(t_follow_targets)
 
     for cat in cats.values():
         scored = [m.score for m in cat.metrics if m.score is not None]
@@ -438,9 +606,11 @@ def grade(
             grp.score = sum(c.score * w for c, w in valid) / tw
         groups.append(grp)
 
+    breakdowns = grade_breakdowns(samples, bucket_samples) if bucket_samples else {}
+
     valid_g = [g for g in groups if g.score is not None]
     if valid_g:
         tw = sum(g.weight for g in valid_g)
         overall = sum(g.score * g.weight for g in valid_g) / tw
-        return GradeReport(groups, overall, letter(overall))
-    return GradeReport(groups, None, None)
+        return GradeReport(groups, overall, letter(overall), breakdowns)
+    return GradeReport(groups, None, None, breakdowns)

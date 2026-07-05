@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import __version__
 from . import connect as C
+from .config import get_t_follow, set_t_follow
 
 try:
     import tkinter as tk
@@ -158,6 +159,18 @@ class App:
         # grade + progress
         grade = ttk.LabelFrame(self.root, text="grade")
         grade.pack(fill="x", **pad)
+        tf = ttk.Frame(grade)
+        tf.pack(fill="x", padx=6, pady=(4, 0))
+        ttk.Label(tf, text="personality follow targets (s):").pack(side="left")
+        self.tf_vars: dict[str, tk.StringVar] = {}
+        targets = get_t_follow()
+        for p in ("aggressive", "standard", "relaxed"):
+            ttk.Label(tf, text=f" {p}").pack(side="left", padx=(8, 2))
+            var = tk.StringVar(value=f"{targets[p]:g}")
+            ttk.Entry(tf, textvariable=var, width=6).pack(side="left")
+            self.tf_vars[p] = var
+        ttk.Label(tf, text="  (fork-dependent; stock: 1.25 / 1.45 / 1.75)",
+                  foreground="gray").pack(side="left")
         grow = ttk.Frame(grade)
         grow.pack(fill="x", padx=6, pady=4)
         self.grade_btn = ttk.Button(
@@ -435,6 +448,22 @@ class App:
         ):
             return
 
+        targets = {}
+        for p, var in self.tf_vars.items():
+            try:
+                v = float(var.get())
+                if 0.3 <= v <= 5.0:
+                    targets[p] = v
+                else:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "bad follow target",
+                    f"'{var.get()}' is not a valid t_follow for {p} (want 0.3-5.0 s)",
+                )
+                return
+        set_t_follow(targets)  # persist for next time (and for the CLI)
+
         if not self.jobs.try_start(", ".join(routes + self.local_paths)):
             messagebox.showinfo("busy", "A grading job is already running — wait for it to finish.")
             return
@@ -443,7 +472,7 @@ class App:
         self.progress.start(80)
         threading.Thread(
             target=C.run_grade_job,
-            args=(self.jobs, routes, list(self.local_paths), self.jwt),
+            args=(self.jobs, routes, list(self.local_paths), self.jwt, targets),
             daemon=True,
         ).start()
         self.root.after(POLL_JOB_MS, self._poll_job)

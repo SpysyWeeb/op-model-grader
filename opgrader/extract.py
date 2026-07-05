@@ -57,6 +57,12 @@ class Meta:
     routes: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     vm_params: dict[str, float] = field(default_factory=dict)  # for VehicleModel
+    git_commit: str = ""
+    git_remote: str = ""
+    dirty: bool | None = None
+    # ONLY whitelisted model-selector params ever leave initData.params
+    # (the raw dump contains GithubSshKeys and other secrets)
+    model_params: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,6 +84,7 @@ class Drive:
 # field_path entries are tried in order; the first that resolves wins.
 _FLOAT = np.float64
 _BOOL = np.bool_
+_INT = np.int16
 
 _SPECS = {
     # carState @ ~100 Hz
@@ -95,6 +102,7 @@ _SPECS = {
     "enabled": ("selfdriveState", ["enabled"], _BOOL),
     "active": ("selfdriveState", ["active"], _BOOL),
     "experimentalMode": ("selfdriveState", ["experimentalMode"], _BOOL),
+    "personality": ("selfdriveState", ["personality.raw"], _INT),
     # carControl @ ~100 Hz
     "ccEnabled": ("carControl", ["enabled"], _BOOL),
     "longActive": ("carControl", ["longActive"], _BOOL),
@@ -119,12 +127,24 @@ _SPECS = {
     ),
 }
 
+# fork model-selector params we are allowed to read out of initData.params.
+# NOTHING else from that dump may ever reach report-visible data.
+MODEL_PARAM_WHITELIST = frozenset(
+    {
+        "ModelManager_ActiveBundle",  # sunnypilot model manager (JSON bundle)
+        "Model",  # FrogPilot model switcher (internal name)
+        "AvailableModels",  # FrogPilot: internal names, comma-separated
+        "AvailableModelNames",  # FrogPilot: display names, comma-separated
+    }
+)
+
 # old-log fallbacks for the enable state (0.9.x controlsState; the vendored
 # 0.11-era schema keeps those fields inside a `deprecated` group)
 _CS_FALLBACKS = {
     "enabled": ["enabled", "deprecated.enabled"],
     "active": ["active", "deprecated.active"],
     "experimentalMode": ["experimentalMode", "deprecated.experimentalMode"],
+    "personality": ["personality.raw", "deprecated.personality.raw"],
 }
 
 
@@ -250,6 +270,8 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
                 for attr, dest in (
                     ("version", "version"),
                     ("gitBranch", "git_branch"),
+                    ("gitCommit", "git_commit"),
+                    ("gitRemote", "git_remote"),
                 ):
                     try:
                         v = getattr(init, attr)
@@ -261,6 +283,22 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
                     wt = init.wallTimeNanos
                     if wt and drive.meta.wall_time_start is None:
                         drive.meta.wall_time_start = wt * 1e-9
+                except Exception:
+                    pass
+                try:
+                    if drive.meta.dirty is None:
+                        drive.meta.dirty = bool(init.dirty)
+                except Exception:
+                    pass
+                # privacy: read ONLY whitelisted model-selector keys from the
+                # params dump -- it contains GithubSshKeys and other secrets
+                try:
+                    for entry in init.params.entries:
+                        if entry.key in MODEL_PARAM_WHITELIST:
+                            raw = bytes(entry.value)[:4096]
+                            drive.meta.model_params[str(entry.key)] = raw.decode(
+                                "utf-8", "replace"
+                            )
                 except Exception:
                     pass
         drive.n_segments += 1
@@ -278,11 +316,22 @@ def extract_drive(name: str, segment_paths: list[str | Path], progress=None) -> 
     # enable-state fallback: prefer selfdriveState, else controlsState
     if not saw_selfdrive:
         for key in _CS_FALLBACKS:
-            ch = to_channel("cs_" + key, _BOOL)
+            ch = to_channel("cs_" + key, _SPECS[key][2])
             if len(ch) > 0:
                 drive.channels[key] = ch
             else:
                 drive.missing.append(key)
+        # a controlsState personality that is all zeros is indistinguishable
+        # from "field not on the wire" (0 = aggressive is the capnp default),
+        # so only trust it when a nonzero value proves the field exists
+        pch = drive.channels.get("personality")
+        if pch is not None and len(pch) > 0 and not (pch.v != 0).any():
+            drive.channels["personality"] = Channel(
+                np.asarray([], dtype=np.float64), np.asarray([], dtype=_INT)
+            )
+            drive.meta.notes.append(
+                "personality unavailable (old log; cannot distinguish 'aggressive' from absent)"
+            )
         drive.meta.notes.append(
             "enable state read from controlsState (pre-selfdriveState log)"
         )
