@@ -1,0 +1,241 @@
+"""Web UI: payload construction, job state machine, server smoke test.
+
+No network: the comma API is mocked by monkeypatching opgrader.webui.requests.
+"""
+
+import json
+import threading
+import time
+import urllib.request
+
+import pytest
+
+from opgrader import webui
+from opgrader.webui import (
+    ApiError,
+    JobManager,
+    build_athena_payload,
+    build_upload_paths,
+    files_badge,
+    request_upload,
+    summarize_route,
+)
+
+
+# ------------------------------------------------------- payload construction
+
+
+def test_build_upload_paths():
+    paths = build_upload_paths("dead1234|0000001c--3d3b422b76", 3)
+    assert paths == [
+        "0000001c--3d3b422b76--0/rlog.zst",
+        "0000001c--3d3b422b76--1/rlog.zst",
+        "0000001c--3d3b422b76--2/rlog.zst",
+    ]
+    # already-bare route names work too
+    assert build_upload_paths("r--x", 1) == ["r--x--0/rlog.zst"]
+
+
+def test_build_athena_payload():
+    paths = ["r--0/rlog.zst", "r--1/rlog.zst"]
+    url_items = [
+        {"url": "https://blob/0", "headers": {"x-extra": "1"}},
+        {"url": "https://blob/1"},
+    ]
+    p = build_athena_payload(paths, url_items, allow_cellular=True)
+    assert p["method"] == "uploadFilesToUrls"
+    assert p["jsonrpc"] == "2.0"
+    fd = p["params"]["files_data"]
+    assert len(fd) == 2
+    assert fd[0]["fn"] == "r--0/rlog.zst"
+    assert fd[0]["url"] == "https://blob/0"
+    assert fd[0]["headers"]["x-ms-blob-type"] == "BlockBlob"
+    assert fd[0]["headers"]["x-extra"] == "1"  # server-provided headers kept
+    assert fd[1]["headers"] == {"x-ms-blob-type": "BlockBlob"}
+    assert all(f["allow_cellular"] is True for f in fd)
+
+    p2 = build_athena_payload(paths, url_items, allow_cellular=False)
+    assert all(f["allow_cellular"] is False for f in p2["params"]["files_data"])
+
+
+class _Resp:
+    def __init__(self, status, body):
+        self.status_code = status
+        self._body = body
+        self.text = json.dumps(body)
+
+    def json(self):
+        return self._body
+
+
+def test_request_upload_offline_device(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append(url)
+        if "upload_urls" in url:
+            return _Resp(200, [{"url": f"https://blob/{i}"} for i in range(2)])
+        return _Resp(404, {})  # athena: device offline
+
+    monkeypatch.setattr(webui.requests, "post", fake_post)
+    with pytest.raises(ApiError) as e:
+        request_upload("dongle1", "r--x", 2, "jwt", allow_cellular=False)
+    assert "offline" in str(e.value)
+    assert e.value.status == 404
+    assert calls[0].endswith("/dongle1/upload_urls/")
+    assert calls[1].endswith("/dongle1")
+
+
+def test_request_upload_success_and_cellular_flag(monkeypatch):
+    seen = {}
+
+    def fake_post(url, json=None, **kw):
+        if "upload_urls" in url:
+            seen["paths"] = json["paths"]
+            return _Resp(200, [{"url": f"https://blob/{i}"} for i in range(len(json["paths"]))])
+        seen["athena"] = json
+        return _Resp(200, {"result": 123, "id": 0})
+
+    monkeypatch.setattr(webui.requests, "post", fake_post)
+    res = request_upload("d", "route--abc", 3, "jwt", allow_cellular=True)
+    assert res["ok"] is True
+    assert "queued" in res["message"]
+    assert seen["paths"] == [f"route--abc--{i}/rlog.zst" for i in range(3)]
+    assert all(f["allow_cellular"] for f in seen["athena"]["params"]["files_data"])
+
+
+def test_request_upload_athena_error_verbatim(monkeypatch):
+    def fake_post(url, **kw):
+        if "upload_urls" in url:
+            return _Resp(200, [{"url": "https://blob/0"}])
+        return _Resp(200, {"error": {"code": -32000, "message": "queue full"}})
+
+    monkeypatch.setattr(webui.requests, "post", fake_post)
+    with pytest.raises(ApiError) as e:
+        request_upload("d", "r--x", 1, "jwt")
+    assert "queue full" in str(e.value)
+
+
+# --------------------------------------------------------- route summarizing
+
+
+def test_summarize_route_and_badge():
+    r = summarize_route(
+        {
+            "fullname": "d1|0000001c--3d3b422b76",
+            "segment_numbers": [0, 1, 2, 3],
+            "start_time_utc_millis": 1_700_000_000_000,
+            "end_time_utc_millis": 1_700_000_600_000,
+            "git_branch": "master",
+        }
+    )
+    assert r["n_segments"] == 4
+    assert r["duration_s"] == 600.0
+    assert r["name"] == "0000001c--3d3b422b76"
+
+    b = files_badge({"logs": ["u"] * 4, "qlogs": ["u"] * 4}, 4)
+    assert b["kind"] == "ready" and "4/4" in b["label"]
+    b = files_badge({"logs": ["u"] * 2, "qlogs": ["u"] * 4}, 4)
+    assert b["kind"] == "partial" and "2/4" in b["label"]
+    b = files_badge({"logs": [], "qlogs": ["u"] * 4}, 4)
+    assert b["kind"] == "none" and "qlog" in b["label"]
+    b = files_badge({}, 0)
+    assert b["kind"] == "none"
+
+
+# ------------------------------------------------------------- job machinery
+
+
+def test_job_manager_state_machine():
+    jm = JobManager()
+    snap = jm.snapshot()
+    assert snap["active"] is False and snap["phase"] == "idle"
+
+    assert jm.try_start("job A") is True
+    assert jm.try_start("job B") is False  # one at a time
+
+    jm.update(phase="downloading", detail="seg 1/5", progress=(1, 5))
+    s = jm.snapshot()
+    assert s["phase"] == "downloading" and s["progress"] == (1, 5)
+
+    jm.finish("/reports/x.html")
+    s = jm.snapshot()
+    assert s["active"] is False and s["phase"] == "done"
+    assert s["report"] == "/reports/x.html"
+
+    # can start again after finishing
+    assert jm.try_start("job C") is True
+    try:
+        raise ValueError("boom")
+    except ValueError as e:
+        jm.fail(e)
+    s = jm.snapshot()
+    assert s["active"] is False and s["phase"] == "error"
+    assert s["error"]["message"] == "boom"
+    assert any("ValueError" in line for line in s["error"]["traceback"])
+    # updates after completion are ignored
+    jm.update(phase="downloading")
+    assert jm.snapshot()["phase"] == "error"
+
+
+# --------------------------------------------------------------- server smoke
+
+
+@pytest.fixture()
+def server():
+    httpd = webui.make_server(port=0)  # free port, 127.0.0.1 only
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    httpd.server_close()
+    t.join(timeout=5)
+
+
+def _get(url):
+    with urllib.request.urlopen(url, timeout=5) as r:
+        return r.status, r.read()
+
+
+def test_server_serves_index_and_job(server):
+    status, body = _get(server + "/")
+    assert status == 200
+    assert b"op-model-grader" in body
+
+    status, body = _get(server + "/api/job")
+    assert status == 200
+    j = json.loads(body)
+    assert j["phase"] in ("idle", "done", "error")
+
+    status, body = _get(server + "/api/reports")
+    assert status == 200
+    assert "reports" in json.loads(body)
+
+
+def test_server_binds_localhost_only(server):
+    # the server address is literally 127.0.0.1
+    assert "127.0.0.1" in server
+
+
+def test_server_bad_requests_return_json_errors(server):
+    import urllib.error
+
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _get(server + "/api/routes")  # missing dongle param
+    assert e.value.code in (400, 401)
+    assert "error" in json.loads(e.value.read())
+
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _get(server + "/reports/../../etc/passwd.html")
+    assert e.value.code in (400, 404)
+
+    # POST /api/grade with nothing selected
+    req = urllib.request.Request(
+        server + "/api/grade",
+        data=json.dumps({"routes": [], "paths": []}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=5)
+    assert e.value.code == 400

@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>op-model-grader</title>
+<style>
+:root{
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,0.10);
+  --model:#2a78d6; --driver:#1baf7a;
+  --good:#0ca30c; --warnc:#fab219; --bad:#d03b3b;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10);
+    --model:#3987e5; --driver:#199e70;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1020px;margin:0 auto;padding:24px 20px 60px}
+h1{font-size:1.6rem;margin:0}
+h2{font-size:1.1rem;margin:28px 0 10px;border-bottom:1px solid var(--grid);padding-bottom:6px}
+.sub{color:var(--ink2);margin:.2em 0 1em}
+.muted{color:var(--muted);font-size:.85em}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin:12px 0}
+button{background:var(--model);color:#fff;border:none;border-radius:8px;
+  padding:7px 14px;font:inherit;cursor:pointer}
+button:disabled{background:var(--muted);cursor:default}
+button.ghost{background:transparent;color:var(--model);border:1px solid var(--model)}
+button.small{padding:3px 10px;font-size:.85em}
+input[type=text],textarea,select{background:var(--page);color:var(--ink);
+  border:1px solid var(--axis);border-radius:8px;padding:7px 10px;font:inherit;width:100%}
+select{width:auto;min-width:240px}
+table{border-collapse:collapse;width:100%;font-size:.9em}
+th{text-align:left;color:var(--muted);font-weight:500;border-bottom:1px solid var(--grid);padding:6px 8px 6px 0}
+td{padding:6px 8px 6px 0;border-bottom:1px solid var(--grid);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.badge{font-size:.8em;padding:2px 9px;border-radius:9px;border:1px solid var(--border);white-space:nowrap}
+.badge.ready{color:var(--good);border-color:var(--good)}
+.badge.partial{color:var(--warnc);border-color:var(--warnc)}
+.badge.none{color:var(--muted)}
+.badge.loading{color:var(--muted);border-style:dashed}
+.row-note{font-size:.8em;color:var(--driver)}
+.warn{background:color-mix(in srgb, var(--warnc) 14%, var(--surface));border:1px solid var(--warnc);
+  border-radius:8px;padding:9px 13px;margin:10px 0;font-size:.92em}
+.errbox{background:color-mix(in srgb, var(--bad) 10%, var(--surface));border:1px solid var(--bad);
+  border-radius:8px;padding:9px 13px;margin:10px 0;font-size:.92em;white-space:pre-wrap;font-family:ui-monospace,monospace}
+.okbox{background:color-mix(in srgb, var(--good) 10%, var(--surface));border:1px solid var(--good);
+  border-radius:8px;padding:9px 13px;margin:10px 0;font-size:.92em}
+.progress{height:10px;background:var(--grid);border-radius:6px;overflow:hidden;margin:8px 0}
+.progress > div{height:100%;background:var(--model);width:0%;transition:width .3s}
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+label.cb{display:inline-flex;gap:6px;align-items:center;font-size:.9em;color:var(--ink2);cursor:pointer}
+a{color:var(--model)}
+code{background:var(--grid);border-radius:4px;padding:1px 5px;font-size:.9em}
+.hidden{display:none}
+#reports li{margin:3px 0}
+</style>
+</head><body>
+<div class="wrap">
+<header>
+  <h1>op-model-grader</h1>
+  <p class="sub">Grade your openpilot model against your own manual driving.
+    <span class="muted">Local-only server — your token never leaves this machine except to api/athena.comma.ai.</span></p>
+</header>
+
+<div id="authPanel" class="card hidden">
+  <h2 style="margin-top:0;border:none">Connect your comma account</h2>
+  <p>This tool needs a comma API token (JWT) to list your routes and download rlogs. Get one:</p>
+  <ul>
+    <li>Open <a href="https://jwt.comma.ai" target="_blank" rel="noopener">jwt.comma.ai</a>, sign in, and copy the token, or</li>
+    <li>if you've used comma's CLI tooling before, the token is already in <code>~/.comma/auth.json</code>.</li>
+  </ul>
+  <textarea id="tokenBox" rows="3" placeholder="paste your JWT here"></textarea>
+  <div class="controls">
+    <button id="saveToken">Save token</button>
+    <span id="authMsg" class="muted"></span>
+  </div>
+</div>
+
+<div id="main" class="hidden">
+  <div class="muted" id="whoami"></div>
+
+  <h2>Routes</h2>
+  <div class="controls">
+    <select id="deviceSel"></select>
+    <button class="ghost" id="refreshBtn">Refresh</button>
+    <label class="cb"><input type="checkbox" id="allowCell"> upload over cell data</label>
+    <span id="routesMsg" class="muted"></span>
+  </div>
+  <div class="card" style="overflow-x:auto">
+    <table id="routesTable">
+      <thead><tr><th></th><th>Started</th><th>Duration</th><th>Segments</th><th>Branch</th><th>rlogs</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="routesEmpty" class="muted hidden">No routes found for this device.</div>
+  </div>
+
+  <h2>Local rlogs (optional)</h2>
+  <div class="card">
+    <p class="muted" style="margin-top:0">Paste directories on this computer that contain rlogs (one per line). They are scanned recursively and can be mixed with the routes selected above.</p>
+    <textarea id="pathsBox" rows="2" placeholder="/home/me/rlogs/my-drive"></textarea>
+  </div>
+
+  <h2>Grade</h2>
+  <div class="card">
+    <div id="partialWarn" class="warn hidden">Some selected routes have incomplete rlogs (&ge;80%): the report will miss those minutes.</div>
+    <div class="controls">
+      <button id="gradeBtn">Grade selected</button>
+      <span id="gradeMsg" class="muted"></span>
+    </div>
+    <div id="jobBox" class="hidden">
+      <div class="progress"><div id="jobBar"></div></div>
+      <div id="jobPhase" class="muted"></div>
+    </div>
+    <div id="jobErr" class="errbox hidden"></div>
+    <div id="jobDone" class="okbox hidden"></div>
+  </div>
+
+  <h2>Past reports</h2>
+  <div class="card"><ul id="reports"><li class="muted">none yet</li></ul></div>
+</div>
+</div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const state = { routes: [], badges: {}, pending: new Set(), dongle: null, polling: false };
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { data = {error: 'bad response'}; }
+  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+const post = (path, body) => api(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+
+// ---------------- auth ----------------
+async function checkAuth() {
+  const me = await api('/api/me');
+  if (me.authed) {
+    $('authPanel').classList.add('hidden');
+    $('main').classList.remove('hidden');
+    $('whoami').textContent = 'signed in' + (me.email ? ' as ' + me.email : '') + (me.user_id ? ' (' + me.user_id + ')' : '');
+    await loadDevices();
+    await loadReports();
+  } else {
+    $('authPanel').classList.remove('hidden');
+    $('main').classList.add('hidden');
+    if (me.reason && me.reason !== 'no token') $('authMsg').textContent = me.reason;
+  }
+}
+$('saveToken').onclick = async () => {
+  $('authMsg').textContent = 'checking…';
+  try {
+    await post('/api/auth', {token: $('tokenBox').value});
+    $('authMsg').textContent = 'saved';
+    await checkAuth();
+  } catch (e) { $('authMsg').textContent = e.message; }
+};
+
+// ---------------- devices & routes ----------------
+async function loadDevices() {
+  const d = await api('/api/devices');
+  const sel = $('deviceSel');
+  sel.innerHTML = '';
+  for (const dev of d.devices || []) {
+    const o = document.createElement('option');
+    o.value = dev.dongle_id;
+    o.textContent = (dev.alias || dev.device_type || 'device') + ' — ' + dev.dongle_id;
+    sel.appendChild(o);
+  }
+  if (sel.options.length) { state.dongle = sel.value; await loadRoutes(false); }
+  else $('routesMsg').textContent = 'no devices on this account';
+}
+$('deviceSel').onchange = () => { state.dongle = $('deviceSel').value; loadRoutes(false); };
+$('refreshBtn').onclick = () => loadRoutes(true);
+
+function fmtDur(s) {
+  if (s == null) return '–';
+  const m = Math.round(s / 60);
+  return m >= 60 ? Math.floor(m / 60) + 'h ' + (m % 60) + 'm' : m + ' min';
+}
+
+async function loadRoutes(fresh) {
+  if (!state.dongle) return;
+  $('routesMsg').textContent = 'loading…';
+  try {
+    const d = await api('/api/routes?dongle=' + encodeURIComponent(state.dongle) + (fresh ? '&fresh=1' : ''));
+    state.routes = d.routes || [];
+    renderRoutes();
+    $('routesMsg').textContent = state.routes.length + ' routes';
+    fetchBadges(fresh);
+  } catch (e) { $('routesMsg').textContent = e.message; }
+}
+
+function badgeCell(r) {
+  const b = state.badges[r.fullname];
+  if (!b) return '<span class="badge loading">checking…</span>';
+  return '<span class="badge ' + b.kind + '">' + b.label + '</span>';
+}
+
+function canSelect(r) {
+  const b = state.badges[r.fullname];
+  if (!b || !b.n_segments) return {ok: false, partial: false};
+  const frac = b.n_logs / b.n_segments;
+  return {ok: frac >= 0.8 && b.n_logs > 0, partial: frac < 1};
+}
+
+function renderRoutes() {
+  const tb = $('routesTable').querySelector('tbody');
+  tb.innerHTML = '';
+  $('routesEmpty').classList.toggle('hidden', state.routes.length > 0);
+  for (const r of state.routes) {
+    const sel = canSelect(r);
+    const tr = document.createElement('tr');
+    const started = r.start_utc_millis ? new Date(r.start_utc_millis).toLocaleString() : '–';
+    tr.innerHTML =
+      '<td><input type="checkbox" class="routeCb" data-route="' + r.fullname + '"' + (sel.ok ? '' : ' disabled') + '></td>' +
+      '<td>' + started + '</td>' +
+      '<td>' + fmtDur(r.duration_s) + '</td>' +
+      '<td>' + (r.n_segments || '–') + '</td>' +
+      '<td class="muted">' + (r.git_branch || '') + '</td>' +
+      '<td>' + badgeCell(r) + '</td>' +
+      '<td></td>';
+    const last = tr.lastElementChild;
+    const b = state.badges[r.fullname];
+    if (state.pending.has(r.fullname)) {
+      last.innerHTML = '<span class="row-note">upload queued — uploads when the device is on WiFi</span>';
+    } else if (b && b.kind !== 'ready' && r.n_segments > 0) {
+      const btn = document.createElement('button');
+      btn.className = 'small ghost';
+      btn.textContent = 'Request upload';
+      btn.onclick = () => requestUpload(r, btn, last);
+      last.appendChild(btn);
+    }
+    tb.appendChild(tr);
+  }
+  updatePartialWarn();
+  tb.querySelectorAll('.routeCb').forEach(cb => cb.addEventListener('change', updatePartialWarn));
+}
+
+async function fetchBadges(fresh) {
+  // small-concurrency lazy fetch so 30 routes don't fire at once
+  const queue = state.routes.slice();
+  const workers = Array.from({length: 4}, async () => {
+    while (queue.length) {
+      const r = queue.shift();
+      try {
+        const d = await api('/api/route_files?route=' + encodeURIComponent(r.fullname) +
+                            '&segments=' + (r.n_segments || 0) + (fresh ? '&fresh=1' : ''));
+        state.badges[r.fullname] = d.badge;
+      } catch (e) {
+        state.badges[r.fullname] = {label: 'unknown', kind: 'none', n_logs: 0, n_segments: r.n_segments || 0};
+      }
+    }
+  });
+  await Promise.all(workers);
+  renderRoutes();
+}
+
+// ---------------- upload requests ----------------
+async function requestUpload(r, btn, cell) {
+  btn.disabled = true; btn.textContent = 'requesting…';
+  try {
+    const res = await post('/api/request_upload', {
+      dongle: state.dongle, route: r.fullname, segments: r.n_segments,
+      allow_cellular: $('allowCell').checked,
+    });
+    state.pending.add(r.fullname);
+    cell.innerHTML = '<span class="row-note">' + res.message + '</span>';
+    startPendingPoll();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Request upload';
+    cell.insertAdjacentHTML('beforeend', ' <span class="muted">' + e.message + '</span>');
+  }
+}
+
+function startPendingPoll() {
+  if (state.polling) return;
+  state.polling = true;
+  const tick = async () => {
+    if (!state.pending.size) { state.polling = false; return; }
+    for (const full of Array.from(state.pending)) {
+      const r = state.routes.find(x => x.fullname === full);
+      if (!r) { state.pending.delete(full); continue; }
+      try {
+        const d = await api('/api/route_files?route=' + encodeURIComponent(full) +
+                            '&segments=' + (r.n_segments || 0) + '&fresh=1');
+        state.badges[full] = d.badge;
+        if (d.badge.kind === 'ready') state.pending.delete(full);
+      } catch (e) { /* keep polling */ }
+    }
+    renderRoutes();
+    setTimeout(tick, 30000);
+  };
+  setTimeout(tick, 30000);
+}
+
+// ---------------- grading ----------------
+function updatePartialWarn() {
+  const anyPartial = Array.from(document.querySelectorAll('.routeCb:checked')).some(cb => {
+    const r = state.routes.find(x => x.fullname === cb.dataset.route);
+    return r && canSelect(r).partial;
+  });
+  $('partialWarn').classList.toggle('hidden', !anyPartial);
+}
+
+$('gradeBtn').onclick = async () => {
+  const routes = Array.from(document.querySelectorAll('.routeCb:checked')).map(cb => cb.dataset.route);
+  const paths = $('pathsBox').value.split('\n').map(s => s.trim()).filter(Boolean);
+  $('gradeMsg').textContent = ''; $('jobErr').classList.add('hidden'); $('jobDone').classList.add('hidden');
+  if (!routes.length && !paths.length) { $('gradeMsg').textContent = 'select at least one route or paste a local path'; return; }
+  try {
+    await post('/api/grade', {routes, paths});
+    $('gradeBtn').disabled = true;
+    $('jobBox').classList.remove('hidden');
+    pollJob();
+  } catch (e) { $('gradeMsg').textContent = e.message; }
+};
+
+async function pollJob() {
+  let j;
+  try { j = await api('/api/job'); } catch (e) { setTimeout(pollJob, 1500); return; }
+  const pct = j.progress ? Math.round(100 * j.progress[0] / Math.max(1, j.progress[1])) : null;
+  $('jobBar').style.width = (pct == null ? (j.active ? 40 : 0) : pct) + '%';
+  $('jobPhase').textContent = j.phase + (j.detail ? ' — ' + j.detail : '');
+  if (j.active) { setTimeout(pollJob, 1000); return; }
+  $('gradeBtn').disabled = false;
+  if (j.phase === 'done' && j.report) {
+    $('jobBox').classList.add('hidden');
+    $('jobDone').classList.remove('hidden');
+    $('jobDone').innerHTML = 'Report ready: <a href="' + j.report + '" target="_blank" rel="noopener">' + j.report + '</a>';
+    window.open(j.report, '_blank');
+    loadReports();
+  } else if (j.phase === 'error' && j.error) {
+    $('jobBox').classList.add('hidden');
+    $('jobErr').classList.remove('hidden');
+    $('jobErr').textContent = j.error.message + '\n' + (j.error.traceback || []).join('\n');
+  }
+}
+
+// ---------------- reports ----------------
+async function loadReports() {
+  const d = await api('/api/reports');
+  const ul = $('reports');
+  ul.innerHTML = '';
+  if (!d.reports.length) { ul.innerHTML = '<li class="muted">none yet</li>'; return; }
+  for (const r of d.reports) {
+    const li = document.createElement('li');
+    li.innerHTML = '<a href="' + r.url + '" target="_blank" rel="noopener">' + r.name + '</a> ' +
+      '<span class="muted">' + new Date(r.mtime * 1000).toLocaleString() + ' · ' + Math.round(r.size / 1024) + ' KB</span>';
+    ul.appendChild(li);
+  }
+}
+
+// resume UI state if a job is already running (page reload)
+(async () => {
+  await checkAuth();
+  try {
+    const j = await api('/api/job');
+    if (j.active) { $('jobBox').classList.remove('hidden'); $('gradeBtn').disabled = true; pollJob(); }
+  } catch (e) {}
+})();
+</script>
+</body></html>

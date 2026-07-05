@@ -39,12 +39,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jwt", help="comma API JWT (default: ~/.comma/auth.json)")
     p.add_argument("-o", "--out", default="report.html", help="output HTML path")
     p.add_argument("--open", action="store_true", help="open the report in a browser")
+    p.add_argument(
+        "--ui",
+        action="store_true",
+        help="start the local web UI (browse routes, request uploads, grade)",
+    )
+    p.add_argument(
+        "--port", type=int, default=8385, help="web UI port (default 8385)"
+    )
     p.add_argument("--version", action="version", version=f"opgrader {__version__}")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.ui:
+        if args.logs or args.route:
+            print(
+                "warning: --ui ignores log paths and --route; "
+                "use the page to pick routes",
+                file=sys.stderr,
+            )
+        from .webui import serve
+
+        serve(port=args.port)
+        return 0
+
     if not args.logs and not args.route:
         build_parser().print_help()
         return 2
