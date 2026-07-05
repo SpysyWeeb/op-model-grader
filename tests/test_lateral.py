@@ -495,31 +495,58 @@ def test_intent_lane_change_classified():
 
 
 def test_pingpong_bins_and_worst():
-    dur = 140.0
+    # Two speed phases (0-5 mph, then 10-20 mph) so TWO bins qualify for
+    # scoring -- a category/bin needs >= MIN_SCORED_FOR_CATEGORY scored
+    # things before it gets an overall grade (see grading.MIN_SCORED_FOR_CATEGORY),
+    # so a single qualifying bin must not by itself produce pp.score.
+    phase = 140.0
+    dur = phase * 2
     t = _t(dur)
-    engaged = t < 70
+    engaged = (t < 70) | ((t >= phase) & (t < phase + 70))
     angle = np.where(
         engaged,
         8.0 * np.sin(2 * np.pi * 0.8 * t),
         4.0 * np.sin(2 * np.pi * 0.8 * t),
     )
-    d = make_drive(dur, vEgo=2.2, steeringAngleDeg=angle,
+    vego = np.where(t < phase, 2.2, 6.7)  # 4.9 mph, then 15 mph
+    d = make_drive(dur, vEgo=vego, steeringAngleDeg=angle,
                    enabled=engaged, latActive=engaged, longActive=engaged)
     seg, da = _prep(d)
     pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
     assert pp is not None
     b0 = pp.bins[0]  # 0-5 mph (2.2 m/s = 4.9 mph)
+    b2 = pp.bins[2]  # 10-20 mph (6.7 m/s = 15 mph)
     assert b0.engaged_s > 30 and b0.manual_s > 30
+    assert b2.engaged_s > 30 and b2.manual_s > 30
     assert b0.engaged_rms == pytest.approx(2 * b0.manual_rms, rel=0.1)
     # same frequency both sides -> similar reversal rates (~2*0.8*60 /min)
     assert b0.engaged_rev == pytest.approx(96.0, rel=0.15)
     assert b0.manual_rev == pytest.approx(96.0, rel=0.15)
     assert b0.score is not None
-    assert pp.score == pytest.approx(b0.score)
-    assert pp.worst_bin is b0
+    assert b2.score is not None
+    # identical oscillation shape at both speeds -> both bins score the same,
+    # so the engaged-time-weighted overall equals either bin's own score
+    assert pp.score == pytest.approx(b0.score, rel=0.05)
+    assert pp.score == pytest.approx(b2.score, rel=0.05)
+    assert pp.worst_bin in (b0, b2)
     assert len(pp.worst_windows) == 3
     # 1 mph sub-bins: 60 s of engaged time at 4.9 mph
     assert any(sb.lo_mph == 4 for sb in pp.sub_bins)
+
+
+def test_pingpong_single_bin_insufficient_for_overall_score():
+    """A lone qualifying bin must not by itself produce an overall score."""
+    dur = 140.0
+    t = _t(dur)
+    engaged = t < 70
+    angle = np.where(engaged, 8.0 * np.sin(2 * np.pi * 0.8 * t), 4.0 * np.sin(2 * np.pi * 0.8 * t))
+    d = make_drive(dur, vEgo=2.2, steeringAngleDeg=angle,
+                   enabled=engaged, latActive=engaged, longActive=engaged)
+    seg, da = _prep(d)
+    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    assert pp is not None
+    assert pp.bins[0].score is not None
+    assert pp.score is None
 
 
 def test_commanded_angle_roundtrip():

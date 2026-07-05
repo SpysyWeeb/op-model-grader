@@ -98,16 +98,20 @@ def test_event_with_flip_tagged_mixed_and_excluded_from_buckets():
 
 
 def test_bucket_grades_against_shared_baseline():
-    samples = {k: {"model": [], "driver": []} for k in ("rms_jerk",)}
     from opgrader.grading import METRICS, grade_breakdowns
 
+    # Two Smoothness metrics with identical shapes: a category needs
+    # >= MIN_SCORED_FOR_CATEGORY scored metrics before it gets a grade (see
+    # grading.MIN_SCORED_FOR_CATEGORY), so a single populated metric must not
+    # by itself produce a bucket score.
     samples = {m.key: {"model": [], "driver": []} for m in METRICS}
     buckets = {m.key: {b: [] for b in ("chill", "experimental",
                                        "aggressive", "standard", "relaxed")} for m in METRICS}
-    samples["rms_jerk"]["driver"] = [1.0, 1.0, 1.0]
-    buckets["rms_jerk"]["chill"] = [1.0, 1.0, 1.0]  # matches you -> 100
-    buckets["rms_jerk"]["experimental"] = [2.0, 2.0, 2.0]  # 2x -> 50
-    buckets["rms_jerk"]["aggressive"] = [1.0, 1.0]  # n=2 -> gated
+    for key in ("rms_jerk", "p95_jerk"):
+        samples[key]["driver"] = [1.0, 1.0, 1.0]
+        buckets[key]["chill"] = [1.0, 1.0, 1.0]  # matches you -> 100
+        buckets[key]["experimental"] = [2.0, 2.0, 2.0]  # 2x -> 50
+        buckets[key]["aggressive"] = [1.0, 1.0]  # n=2 -> gated
 
     bd = grade_breakdowns(samples, buckets)
     assert bd["mode"]["chill"].score == pytest.approx(100.0)
@@ -116,6 +120,25 @@ def test_bucket_grades_against_shared_baseline():
     assert agg.score is None  # only gated metrics -> no score
     m = next(m for c in agg.categories for m in c.metrics if m.definition.key == "rms_jerk")
     assert m.n_model == 2 and m.score is None
+
+
+def test_bucket_single_scored_metric_insufficient():
+    """A bucket with only ONE scored metric must not get a category grade."""
+    from opgrader.grading import METRICS, grade_breakdowns
+
+    samples = {m.key: {"model": [], "driver": []} for m in METRICS}
+    buckets = {m.key: {b: [] for b in ("chill", "experimental",
+                                       "aggressive", "standard", "relaxed")} for m in METRICS}
+    samples["rms_jerk"]["driver"] = [1.0, 1.0, 1.0]
+    buckets["rms_jerk"]["chill"] = [1.0, 1.0, 1.0]  # would be 100 alone
+
+    bd = grade_breakdowns(samples, buckets)
+    chill = bd["mode"]["chill"]
+    m = next(mr for c in chill.categories for mr in c.metrics if mr.definition.key == "rms_jerk")
+    assert m.score == pytest.approx(100.0)  # the metric itself still scores
+    smoothness = next(c for c in chill.categories if c.name == "Smoothness")
+    assert smoothness.score is None  # but the category doesn't, with only 1
+    assert chill.score is None  # and nothing rolls up to the bucket grade
 
 
 # --------------------------------------------------------- follow adherence

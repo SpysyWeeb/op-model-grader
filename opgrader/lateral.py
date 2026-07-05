@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .events import DriveArrays, Event, _contiguous_runs, _idx_after
+from .grading import MIN_SCORED_FOR_CATEGORY
 from .metrics import rms, smooth
 from .segments import Segmentation
 
@@ -547,7 +548,7 @@ def analyze_pingpong(
     ]
 
     scored = [b for b in bins if b.score is not None]
-    if scored:
+    if len(scored) >= MIN_SCORED_FOR_CATEGORY:
         w = np.array([b.engaged_s for b in scored])
         s = np.array([b.score for b in scored])
         score = float(np.sum(w * s) / np.sum(w))

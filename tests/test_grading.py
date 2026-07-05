@@ -195,7 +195,8 @@ def test_resisted_divergence_only_from_conflict_episodes():
     """No conflict window -> no divergence -> contributes NOTHING (not a
     zero), same as cmd_onset_lead. Band-agnostic: curve episodes count too.
     Driver-side (manual) episodes never contribute (needs_driver=False,
-    model-internal metric)."""
+    model-internal metric). All default to side="left" here; side-routing
+    itself is covered separately below."""
     turns = [
         _ep(engaged=True, sharp=True, divergence_deg=75.0),    # counts
         _ep(engaged=True, sharp=True, divergence_deg=None),    # no conflict: excluded
@@ -204,7 +205,23 @@ def test_resisted_divergence_only_from_conflict_episodes():
     ]
     samples = empty_samples()
     add_turn_samples(samples, turns)
-    assert samples["resisted_divergence"]["model"] == [75.0, 40.0]
+    assert samples["resisted_divergence_left"]["model"] == [75.0, 40.0]
+    assert samples["resisted_divergence_right"]["model"] == []
+
+
+def test_resisted_divergence_split_left_right():
+    """Split by which way the turn itself went, same convention as
+    cmd_onset_lead_left/right -- a left and a right conflict must land in
+    separate sample pools, not be pooled together."""
+    turns = [
+        _ep(engaged=True, side="left", divergence_deg=75.0),
+        _ep(engaged=True, side="left", divergence_deg=40.0),
+        _ep(engaged=True, side="right", divergence_deg=200.0),
+    ]
+    samples = empty_samples()
+    add_turn_samples(samples, turns)
+    assert samples["resisted_divergence_left"]["model"] == [75.0, 40.0]
+    assert samples["resisted_divergence_right"]["model"] == [200.0]
 
 
 def test_resisted_divergence_not_gated_by_contaminated():
@@ -216,14 +233,14 @@ def test_resisted_divergence_not_gated_by_contaminated():
     ]
     samples = empty_samples()
     add_turn_samples(samples, turns)
-    assert samples["resisted_divergence"]["model"] == [200.0, 150.0]
+    assert samples["resisted_divergence_left"]["model"] == [200.0, 150.0]
 
 
 def test_resisted_divergence_anchor_scores():
     samples = empty_samples()
-    samples["resisted_divergence"]["model"] = [75.0, 75.0, 75.0]  # exactly the 50-point anchor
+    samples["resisted_divergence_left"]["model"] = [75.0, 75.0, 75.0]  # exactly the 50-point anchor
     rep = grade(samples)
-    m = next(m for c in rep.categories for m in c.metrics if m.definition.key == "resisted_divergence")
+    m = next(m for c in rep.categories for m in c.metrics if m.definition.key == "resisted_divergence_left")
     assert m.model_agg == pytest.approx(75.0)
     assert m.score == pytest.approx(50.0)
 

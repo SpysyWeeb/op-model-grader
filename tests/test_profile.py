@@ -106,8 +106,8 @@ def test_poolable_keys_derived_from_metrics_table():
     # never poolable in the first place)
     assert "turn_in_delay" not in keys
     assert "missed_turn_in" not in keys
-    for k in ("rescue_rate", "resisted_divergence", "curve_s_overshoot",
-              "cmd_unwind_lead_left", "cmd_onset_lead_right"):
+    for k in ("rescue_rate", "resisted_divergence_left", "resisted_divergence_right",
+              "curve_s_overshoot", "cmd_unwind_lead_left", "cmd_onset_lead_right"):
         assert k not in keys
     # derived, not hand-typed: exactly matches the needs_driver/scorer filter
     expected = {m.key for m in METRICS if m.needs_driver and m.scorer in ("ratio", "ratio_or_abs")}

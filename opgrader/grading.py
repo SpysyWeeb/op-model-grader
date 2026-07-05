@@ -24,6 +24,13 @@ counterpart (driver-rescue rate, missed turn-ins) or whose human baseline is
 ~zero (S-curve overshoot) use an absolute anchor scale instead, documented
 per metric. Aggregation is the median of per-event values (mean for
 rate-of-events metrics). A ratio metric needs >= MIN_EVENTS samples per side.
+
+A category's own score is the mean of its scored metrics -- but only once
+>= MIN_SCORED_FOR_CATEGORY of them actually have a score; one lone scored
+metric (everything else gated by MIN_EVENTS) would otherwise hand its single
+value straight through as the whole category's grade. Same rule for
+Ping-Pong's bin average (a category unto itself, scored outside METRICS) and
+every mode/personality breakdown bucket.
 """
 
 from __future__ import annotations
@@ -38,6 +45,10 @@ from .extract import Drive
 from .segments import Segmentation, _contiguous_runs
 
 MIN_EVENTS = 3
+# A category graded off a single scored metric is one metric's quirks away
+# from a misleading 100 (or 0) with nothing else to check it against -- need
+# at least two independently-scored things before a category gets a grade.
+MIN_SCORED_FOR_CATEGORY = 2
 
 GROUP_WEIGHTS = {"Lateral": 0.5, "Longitudinal": 0.5}
 
@@ -151,13 +162,20 @@ METRICS: list[MetricDef] = [
     # curve-band, signaled or not -- blinker-free, sourced from the same
     # TurnEpisodes Turn Execution uses; see add_turn_samples)
     MetricDef(
-        "resisted_divergence", "Cmd-vs-actual divergence while you resisted", "Turn-In Timing", "deg",
+        "resisted_divergence_left", "Cmd-vs-actual divergence while you resisted (left)", "Turn-In Timing", "deg",
         scorer="abs", abs_anchors=(15.0, 75.0, 300.0), needs_driver=False,
         note="absolute scale: 100 at <=15°, 50 at 75°, 0 at >=300° peak |actual - commanded| angle "
         "during a sustained (>=0.3s) window where you genuinely resisted the model's own steering "
-        "torque -- only scored on episodes with real, sustained disagreement. Anchors set from the "
-        "real-data divergence distribution across two Palisade routes (35 conflict episodes: median "
-        "~79°, p90 ~337°, max 823° on one genuine multi-second tug-of-war) -- see report footer",
+        "torque -- only scored on episodes with real, sustained disagreement. Split left/right by "
+        "which way the turn itself went (same convention as cmd_onset_lead_left/right), same anchors "
+        "both sides. Anchors set from the real-data divergence distribution across two Palisade "
+        "routes (35 conflict episodes: median ~79°, p90 ~337°, max 823° on one genuine multi-second "
+        "tug-of-war) -- see report footer",
+    ),
+    MetricDef(
+        "resisted_divergence_right", "Cmd-vs-actual divergence while you resisted (right)", "Turn-In Timing", "deg",
+        scorer="abs", abs_anchors=(15.0, 75.0, 300.0), needs_driver=False,
+        note="same metric and anchors as resisted_divergence_left, scoped to turns that went right",
     ),
     MetricDef(
         "cmd_onset_lead_left", "Cmd-vs-actual onset lead (left)", "Turn-In Timing", "s",
@@ -450,14 +468,15 @@ def add_turn_samples(samples: dict, turns) -> None:
     model's own unwind/onset, they're a human-forced one. Rescue itself is
     the rescue_rate signal.
 
-    resisted_divergence is the one exception: it is NOT gated on
+    resisted_divergence_{left,right} is the one exception: it is NOT gated on
     contaminated/rescued, because sustained driver resistance against the
     model's own steering IS the contamination mechanism -- gating it the
     same way as the others would exclude precisely the cases it exists to
     catch. It only scores episodes where lateral.detect_turn_episodes found
     a genuine, sustained (>=0.3s) directional conflict (steering torque
     opposing the model's own commanded torque); an episode with no such
-    conflict contributes nothing (not a zero), same as cmd_onset_lead. This
+    conflict contributes nothing (not a zero), same as cmd_onset_lead. Split
+    left/right by ep.side, same convention as cmd_onset_lead_left/right. This
     category is blinker-free and band-agnostic: every engaged turn counts,
     sharp or curve, signaled or not (see lateral.detect_turn_episodes).
     """
@@ -474,7 +493,7 @@ def add_turn_samples(samples: dict, turns) -> None:
             # failure, measured by turn-in metrics)
             add("rescue_rate", "model", 100.0 if ep.rescued else 0.0)
         if ep.engaged:
-            add("resisted_divergence", "model", ep.divergence_deg)
+            add(f"resisted_divergence_{ep.side}", "model", ep.divergence_deg)
         if ep.engaged and (ep.contaminated or ep.rescued):
             continue
         # sharp turns feed the scored metrics; 20-90 deg curve episodes are
@@ -727,7 +746,7 @@ def grade_breakdowns(
                 continue
             for cat in cats.values():
                 scored = [m.score for m in cat.metrics if m.score is not None]
-                cat.score = float(np.mean(scored)) if scored else None
+                cat.score = float(np.mean(scored)) if len(scored) >= MIN_SCORED_FOR_CATEGORY else None
             valid = [(c, weights[c.name]) for c in cats.values() if c.score is not None]
             score = (
                 sum(c.score * w for c, w in valid) / sum(w for _c, w in valid)
@@ -790,7 +809,7 @@ def grade(
 
     for cat in cats.values():
         scored = [m.score for m in cat.metrics if m.score is not None]
-        cat.score = float(np.mean(scored)) if scored else None
+        cat.score = float(np.mean(scored)) if len(scored) >= MIN_SCORED_FOR_CATEGORY else None
 
     # Ping-Pong is scored specially (time-weighted speed-bin comparison)
     cats["Ping-Pong"].score = pingpong_score
