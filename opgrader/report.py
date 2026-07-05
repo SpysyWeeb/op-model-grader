@@ -382,7 +382,7 @@ def _breakdown_tables(breakdowns: dict) -> str:
         heads = "".join(f"<th>{_esc(b)}</th>" for b in buckets)
         grade_cells = "".join(
             f"<td><strong>{_esc(bg[b].letter or '–')}</strong>"
-            + (f" <span class='muted'>{bg[b].score:.0f}</span>" if bg[b].score is not None else "")
+            + (f" <span class='muted'>{_lettered_score(bg[b].score)}</span>" if bg[b].score is not None else "")
             + "</td>"
             for b in buckets
         )
@@ -395,7 +395,7 @@ def _breakdown_tables(breakdowns: dict) -> str:
                 c = bg[b].categories[ci]
                 cat_grades.append(
                     f"<td>{_esc(c.letter or '–')}"
-                    + (f" <span class='muted'>{c.score:.0f}</span>" if c.score is not None else "")
+                    + (f" <span class='muted'>{_lettered_score(c.score)}</span>" if c.score is not None else "")
                     + "</td>"
                 )
             rows.append(
@@ -583,6 +583,19 @@ def _counterfactual_section(cf) -> str:
   {''.join(parts)}
   {data_tip}
 </section>"""
+
+
+def _lettered_score(score: float) -> str:
+    """Round a score that's displayed NEXT TO A LETTER GRADE, but never show
+    '100' unless it truly clears S_CUTOFF -- plain :.0f rounding would show
+    '100' for e.g. 99.6 (a real, non-perfect score) right next to a non-S
+    letter, which reads as a bug ("it says 100 but isn't S-tier?"). Bare
+    numeric scores with no letter alongside (metric rows, ping-pong bins)
+    don't have this problem and keep using plain :.0f -- there's no S-badge
+    for them to contradict."""
+    if score >= S_CUTOFF:
+        return "100"
+    return str(min(round(score), 99))
 
 
 def _grade_class(score) -> str:
@@ -794,7 +807,7 @@ def _turn_in_breakdown_table(cat: CategoryResult) -> str:
 
 def _category_card(cat: CategoryResult) -> str:
     letter = cat.letter or "–"
-    score_txt = f"{cat.score:.0f}" if cat.score is not None else "no data"
+    score_txt = _lettered_score(cat.score) if cat.score is not None else "no data"
     if cat.name == "Ping-Pong":
         body = _pingpong_card(cat)
     else:
@@ -887,7 +900,7 @@ def _group_hero(grades: GradeReport) -> str:
     cells = []
     for g in grades.groups:
         letter = g.letter or "–"
-        score = f"{g.score:.0f}" if g.score is not None else "no data"
+        score = _lettered_score(g.score) if g.score is not None else "no data"
         cells.append(f"""
   <div class="ghero {_grade_class(g.score)}">
     <div class="gletter">{_esc(letter)}</div>
@@ -895,7 +908,7 @@ def _group_hero(grades: GradeReport) -> str:
     <div class="gscore">{_esc(score)}</div>
   </div>""")
     overall = (
-        f"Overall {grades.overall_letter} ({grades.overall_score:.0f}/100)"
+        f"Overall {grades.overall_letter} ({_lettered_score(grades.overall_score)}/100)"
         if grades.overall_score is not None
         else "Overall: not enough comparable data"
     )
@@ -977,7 +990,7 @@ def render_report(analysis, out_path: str | Path) -> Path:
         cards = "".join(_category_card(c) for c in g.categories)
         group_sections.append(f"""
 <section>
-  <h2>{_esc(g.name)} <span class="muted">{_esc(g.letter or 'no data')}{f" · {g.score:.0f}" if g.score is not None else ''}</span></h2>
+  <h2>{_esc(g.name)} <span class="muted">{_esc(g.letter or 'no data')}{f" · {_lettered_score(g.score)}" if g.score is not None else ''}</span></h2>
   <div class="cards">{cards}</div>
 </section>""")
 
