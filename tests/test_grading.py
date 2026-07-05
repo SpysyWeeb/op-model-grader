@@ -134,3 +134,11 @@ def test_diagnostic_metrics_never_scored():
 def test_category_weights_sum_to_one_per_group():
     for grp, cats in CATEGORY_GROUPS.items():
         assert sum(cats.values()) == pytest.approx(1.0)
+
+
+def test_score_ratio_match_penalizes_both_directions():
+    # style metrics: model must not be rewarded for e.g. tailgating harder
+    assert score_ratio(1.0, 1.0, better="match") == 100.0
+    assert score_ratio(2.0, 1.0, better="match") == 50.0
+    assert score_ratio(0.5, 1.0, better="match") == 50.0  # half your gap = same penalty as double
+    assert score_ratio(0.25, 1.0, better="match") == 0.0

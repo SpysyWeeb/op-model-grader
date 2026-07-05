@@ -47,6 +47,10 @@ compared to yours `d`:
 
 ```
 r = m / max(d, eps)              # lower-is-better; inverted if higher is better
+                                 # "match" metrics (follow gap, peak decel + its
+                                 # timing, launch time-to-speed, unwind rate) use
+                                 # r = max(m,d)/min(m,d): deviating from the
+                                 # driver in either direction is penalized
 score = 100                      if r <= 1        (as good as you or better)
 score = 100 - 50*(r-1)           if 1 < r <= 2    (twice your number = 50)
 score = max(0, 50 - 25*(r-2))    if r > 2

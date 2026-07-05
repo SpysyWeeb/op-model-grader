@@ -15,7 +15,10 @@ aggregate, d = driver aggregate:
     score = 100 - 50*(r-1)        if 1 < r <= 2     (2x worse than you = 50)
     score = max(0, 50 - 25*(r-2)) if r > 2
 
-Higher-is-better metrics invert the ratio. eps is a per-metric floor at the
+Higher-is-better metrics invert the ratio. "match" metrics (follow gap,
+peak decel and its timing, launch time-to-speed, unwind rate) are style
+targets: deviation from the driver in either direction is penalized, so
+r = max(m,d)/min(m,d). eps is a per-metric floor at the
 scale where differences stop being meaningful. Metrics without a human
 counterpart (driver-rescue rate, missed turn-ins) or whose human baseline is
 ~zero (S-curve overshoot) use an absolute anchor scale instead, documented
@@ -70,7 +73,7 @@ class MetricDef:
     label: str
     category: str
     unit: str
-    better: str = "lower"  # "lower" | "higher"
+    better: str = "lower"  # "lower" | "higher" | "match" (deviation either way is worse)
     eps: float = 1e-6
     agg: str = "median"  # "median" | "mean"
     scorer: str = "ratio"  # "ratio" | "abs" | "ratio_or_abs" | "none"
@@ -87,16 +90,16 @@ METRICS: list[MetricDef] = [
     MetricDef("accel_reversals", "Accel reversals", "Smoothness", "/min", eps=0.2),
     MetricDef("pct_hard_accel", "Time |accel| > 2", "Smoothness", "%", eps=0.1),
     # ---- Longitudinal / Following (per follow window)
-    MetricDef("median_gap", "Median time gap", "Following", "s", eps=0.2),
+    MetricDef("median_gap", "Median time gap", "Following", "s", better="match", eps=0.2),
     MetricDef("gap_hunting", "Gap hunting (detrended std)", "Following", "s", eps=0.05),
     MetricDef("follow_reversals", "Accel reversals while following", "Following", "/min", eps=0.2),
     # ---- Longitudinal / Stopping (per stop approach)
-    MetricDef("peak_decel", "Peak decel", "Stopping", "m/s²", eps=0.1),
-    MetricDef("peak_decel_frac", "Peak-decel timing (fraction of approach)", "Stopping", "", eps=0.05),
+    MetricDef("peak_decel", "Peak decel", "Stopping", "m/s²", better="match", eps=0.1),
+    MetricDef("peak_decel_frac", "Peak-decel timing (fraction of approach)", "Stopping", "", better="match", eps=0.05),
     MetricDef("stop_lurch", "Stop lurch (max |jerk|, last 2 s)", "Stopping", "m/s³", eps=0.05),
     MetricDef("accel_at_crawl", "|Accel| at 0.2 m/s", "Stopping", "m/s²", eps=0.05),
     # ---- Longitudinal / Launch (per launch)
-    MetricDef("time_to_5", "Time to 5 m/s", "Launch", "s", eps=0.2),
+    MetricDef("time_to_5", "Time to 5 m/s", "Launch", "s", better="match", eps=0.2),
     MetricDef("launch_peak_jerk", "Peak |jerk| in launch", "Launch", "m/s³", eps=0.05),
     # ---- Longitudinal / Responsiveness (per stimulus)
     MetricDef("lead_decel_latency", "Lead-decel response latency", "Responsiveness", "s", eps=0.1),
@@ -112,7 +115,7 @@ METRICS: list[MetricDef] = [
         eps=0.1, scorer="ratio_or_abs", abs_anchors=(0.0, 1.0, 2.0), abs_when_driver_below=0.5,
         note="absolute scale (100 at 0, 50 at 1, 0 at ≥2 per turn) when your baseline is ~0",
     ),
-    MetricDef("unwind_rate", "Unwind rate after peak (sharp turns)", "Turn Execution", "deg/s", better="higher", eps=1.0),
+    MetricDef("unwind_rate", "Unwind rate after peak (sharp turns)", "Turn Execution", "deg/s", better="match", eps=1.0),
     MetricDef(
         "rescue_rate", "Driver-rescue rate in unwind", "Turn Execution", "%",
         agg="mean", scorer="abs", abs_anchors=(0.0, 25.0, 50.0), needs_driver=False,
@@ -157,6 +160,10 @@ def score_ratio(m: float, d: float, better: str = "lower", eps: float = 1e-6) ->
     d = max(float(d), 0.0)
     if better == "higher":
         m, d = d, m
+    if better == "match":
+        # style metrics: deviating from the driver in EITHER direction is worse
+        # (e.g. a shorter follow gap than the driver's must not score 100)
+        m, d = max(m, d), min(m, d)
     r = m / max(d, eps)
     if r <= 1.0:
         return 100.0

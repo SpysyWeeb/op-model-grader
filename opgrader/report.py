@@ -362,7 +362,7 @@ def _group_hero(grades: GradeReport) -> str:
     <div class="overall {_grade_class(grades.overall_score)}">{_esc(overall)}</div>
   </div>
   <div class="gheroes">{''.join(cells)}</div>
-  <div class="herohint">100 = as good as you or better · 50 = twice your (lower-is-better) numbers · human = ground truth</div>
+  <div class="herohint">100 = matches you (or smoother) · 50 = twice your numbers · style metrics count deviation from you in either direction · human = ground truth</div>
 </section>"""
 
 
