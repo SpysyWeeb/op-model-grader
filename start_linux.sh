@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# op-model-grader launcher (Linux / macOS).
+# op-model-grader launcher. Despite the filename, this also runs on macOS
+# (both ship bash and python3) -- named for Linux since that's this repo's
+# primary target; start_windows.bat is the Windows counterpart.
 # First run creates a local .venv and installs the tool; after that it just starts.
 # No arguments -> opens the desktop UI. Any arguments are passed to the CLI instead.
 set -e

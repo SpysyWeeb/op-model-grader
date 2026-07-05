@@ -23,12 +23,12 @@ up on first run and opens the app):
 
 ```
 git clone https://github.com/SpysyWeeb/op-model-grader && cd op-model-grader
-./start.sh        # Linux / macOS
-start.bat         # Windows (or double-click it in Explorer)
+./start_linux.sh        # Linux / macOS
+start_windows.bat       # Windows (or double-click it in Explorer)
 ```
 
 Run a launcher with arguments to use the CLI instead of the UI, e.g.
-`./start.sh testdata/demo -o report.html`.
+`./start_linux.sh testdata/demo -o report.html`.
 
 Manual install, if you prefer:
 

@@ -258,3 +258,23 @@ def test_delete_report_guard_and_cache_clear(tmp_path, monkeypatch):
     freed = connect.clear_route_cache()
     assert freed == 1000
     assert not route.exists() and reports.exists()
+
+
+def test_cache_dir_for_route_strips_windows_reserved_chars():
+    """Route fullnames are "<dongle>|<route>" -- "|" is a valid POSIX filename
+    character but forbidden on Windows (NTFS rejects < > : " / \\ | ? *),
+    which caused a real WinError 123 when this directory name was built with
+    only "/" replaced. Every reserved character must be gone from the result,
+    and the original route string (with "|") must be untouched for API use.
+    """
+    from opgrader.download import cache_dir_for_route
+
+    route = 'abc123|00000022--16f809bf5e'
+    d = cache_dir_for_route(route)
+    assert "|" not in d.name
+    assert route == 'abc123|00000022--16f809bf5e'  # caller's string unmodified
+
+    nasty = 'a<b>c:d"e/f\\g|h?i*j'
+    sanitized = cache_dir_for_route(nasty).name
+    for ch in '<>:"/\\|?*':
+        assert ch not in sanitized

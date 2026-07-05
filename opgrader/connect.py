@@ -18,7 +18,7 @@ from pathlib import Path
 
 import requests
 
-from .download import AUTH_FILE, CACHE_DIR, route_log_urls
+from .download import AUTH_FILE, CACHE_DIR, cache_dir_for_route, route_log_urls
 
 API_BASE = "https://api.comma.ai/v1"
 ATHENA_BASE = "https://athena.comma.ai"
@@ -314,7 +314,7 @@ def run_grade_job(job: JobManager, routes: list[str], paths: list[str], jwt: str
                 raise ApiError("no JWT for downloading routes", status=401)
             job.update(phase="downloading", detail=f"{route}: listing files")
             urls = route_log_urls(route, jwt)
-            dest = CACHE_DIR / route.replace("/", "_")
+            dest = cache_dir_for_route(route)
             dest.mkdir(parents=True, exist_ok=True)
             for i, url in enumerate(urls):
                 ext = ".zst" if urllib.parse.urlparse(url).path.endswith(".zst") else ".bz2"

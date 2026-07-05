@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -24,6 +25,20 @@ AUTH_FILE = Path("~/.comma/auth.json").expanduser()
 CACHE_DIR = Path(
     os.environ.get("OPGRADER_CACHE", "~/.cache/opgrader")
 ).expanduser()
+
+# Windows forbids < > : " / \ | ? * and control chars in path components;
+# route fullnames are "<dongle>|<route>" and comma's own "|" separator is
+# one of them, so this only ever broke for Windows users (POSIX allows it).
+_UNSAFE_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def cache_dir_for_route(route: str) -> Path:
+    """Filesystem-safe cache directory for a route fullname.
+
+    Callers must keep using the raw `route` (with "|") for API calls -- only
+    the local directory name needs sanitizing.
+    """
+    return CACHE_DIR / _UNSAFE_PATH_CHARS.sub("_", route)
 
 
 class DownloadError(RuntimeError):
@@ -75,7 +90,7 @@ def download_route(route: str, jwt: str | None = None, progress=print) -> list[P
     """Download (or reuse cached) rlogs for a route; returns local paths in order."""
     token = load_jwt(jwt)
     urls = route_log_urls(route, token)
-    dest = CACHE_DIR / route.replace("/", "_")
+    dest = cache_dir_for_route(route)
     dest.mkdir(parents=True, exist_ok=True)
     paths = []
     for i, url in enumerate(urls):
