@@ -121,6 +121,62 @@ def test_turn_rescue_detected():
     assert eps[0].contaminated is False  # pressed only after the peak
 
 
+def test_cmd_onset_lead_computed():
+    """cmd ramps the same shape as act but starting 0.4 s later -> the
+    onset-phase lead (mirrors cmd_unwind_lead, just at the 20 deg crossing
+    instead of the 50%-of-peak fall) should read ~+0.4 s."""
+    t, act = _turn_profile()  # act: 0->120 over [2,5) -> crosses 20 deg at t=2.5
+    cmd = np.zeros(len(t))
+    up = (t >= 2.4) & (t < 5.4)
+    cmd[up] = 120.0 * (t[up] - 2.4) / 3.0
+    down = (t >= 5.4) & (t < 9.4)
+    cmd[down] = 120.0 * (1 - (t[down] - 5.4) / 4.0)
+
+    d = make_drive(30.0, vEgo=5.0, steeringAngleDeg=act, ccSteeringAngleDeg=cmd,
+                   enabled=True, latActive=True, longActive=True)
+    seg, da = _prep(d)
+    eps = detect_turn_episodes("synth", seg, da)
+    assert len(eps) == 1
+    ep = eps[0]
+    assert ep.engaged is True
+    assert ep.peak_act == pytest.approx(120.0, abs=1.0)
+    assert ep.never_commanded is False  # cmd reached 120, well past the 20 deg bar
+    assert ep.cmd_onset_lead is not None
+    assert ep.cmd_onset_lead == pytest.approx(0.4, abs=0.05)
+
+
+def test_never_commanded_when_cmd_stays_low():
+    """act peaks at 120 deg (a sharp turn physically happened) but cmd never
+    exceeds 15 deg -- the model's own plan never called for this turn."""
+    t, act = _turn_profile()
+    cmd = np.zeros(len(t))
+    cmd[(t >= 2.0) & (t < 9.0)] = 15.0  # constant, mild, never sharp
+
+    d = make_drive(30.0, vEgo=5.0, steeringAngleDeg=act, ccSteeringAngleDeg=cmd,
+                   enabled=True, latActive=True, longActive=True)
+    seg, da = _prep(d)
+    eps = detect_turn_episodes("synth", seg, da)
+    assert len(eps) == 1
+    ep = eps[0]
+    assert ep.peak_act == pytest.approx(120.0, abs=1.0)
+    assert ep.peak_cmd == pytest.approx(15.0, abs=0.5)
+    assert ep.never_commanded is True
+    assert ep.cmd_onset_lead is None  # never computed: peak_cmd never reached 20 deg
+
+
+def test_never_commanded_false_when_not_engaged():
+    """A manual (not engaged) episode never sets never_commanded -- there's
+    no model command to compare against."""
+    t, act = _turn_profile()
+    d = make_drive(30.0, vEgo=5.0, steeringAngleDeg=act)  # no enabled/latActive
+    seg, da = _prep(d)
+    eps = detect_turn_episodes("synth", seg, da)
+    assert len(eps) == 1
+    assert eps[0].engaged is False
+    assert eps[0].never_commanded is False
+    assert eps[0].cmd_onset_lead is None
+
+
 def test_intent_window_turn_delay():
     dur = 40.0
     t = _t(dur)

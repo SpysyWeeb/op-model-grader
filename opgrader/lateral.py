@@ -120,6 +120,8 @@ class TurnEpisode:
     overshoot_deg: float | None = None
     wobbles: int | None = None
     cmd_unwind_lead: float | None = None  # cmd 50% crossing minus act 50% crossing
+    cmd_onset_lead: float | None = None  # cmd's first |>=20deg| crossing minus t_onset
+    never_commanded: bool = False  # engaged: wheel turned sharply but cmd never called for it
 
 
 def _band(peak_abs: float) -> str:
@@ -195,15 +197,28 @@ def detect_turn_episodes(
                 ph = slice(ip_act, ru_end)
                 ep.rescued = bool(pressed[ph].any() or (~lat_flag[ph]).any())
 
-            # commanded-signal peak & unwind lead
+            # commanded-signal peak, onset lead, and unwind lead
             if cmd is not None:
                 ip_cmd = a + int(np.argmax(np.abs(cmd[a:b])))
                 ep.peak_cmd = float(cmd[ip_cmd])
-                if abs(ep.peak_cmd) >= TURN_ONSET_DEG and iu_act is not None:
-                    below_half_cmd = np.abs(cmd) <= UNWIND_FRACTION * abs(ep.peak_cmd)
-                    iu_cmd = _first_idx(below_half_cmd[:end], ip_cmd + 1)
-                    if iu_cmd is not None:
-                        ep.cmd_unwind_lead = float(t[iu_cmd] - t[iu_act])
+                # blinker-free "missed turn-in": the wheel turned sharply but
+                # the model's own commanded path never called for it at all
+                ep.never_commanded = bool(engaged and abs(ep.peak_cmd) < TURN_ONSET_DEG)
+                if abs(ep.peak_cmd) >= TURN_ONSET_DEG:
+                    # onset-phase lead: mirrors the unwind-phase lead below,
+                    # just at the first |cmd| >= 20 deg crossing (within this
+                    # episode's own window) instead of the fall to 50% of
+                    # peak; t_onset is already the first |act|-or-|cmd|
+                    # crossing that opened this episode, so this is simply
+                    # cmd's own crossing time minus that.
+                    ion_cmd = _first_idx((np.abs(cmd) >= TURN_ONSET_DEG)[:b], a)
+                    if ion_cmd is not None:
+                        ep.cmd_onset_lead = float(t[ion_cmd] - t[a])
+                    if iu_act is not None:
+                        below_half_cmd = np.abs(cmd) <= UNWIND_FRACTION * abs(ep.peak_cmd)
+                        iu_cmd = _first_idx(below_half_cmd[:end], ip_cmd + 1)
+                        if iu_cmd is not None:
+                            ep.cmd_unwind_lead = float(t[iu_cmd] - t[iu_act])
 
             # S-curve overshoot after the actual angle unwinds through zero
             izero = _first_idx((sgn * act <= 0)[:end], ip_act + 1)
