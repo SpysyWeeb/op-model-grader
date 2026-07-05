@@ -18,6 +18,20 @@ decimated too heavily for any of that.
 
 ## Install
 
+Easiest — grab the code, then run the launcher for your OS (it sets everything
+up on first run and opens the app):
+
+```
+git clone https://github.com/SpysyWeeb/op-model-grader && cd op-model-grader
+./start.sh        # Linux / macOS
+start.bat         # Windows (or double-click it in Explorer)
+```
+
+Run a launcher with arguments to use the CLI instead of the UI, e.g.
+`./start.sh testdata/demo -o report.html`.
+
+Manual install, if you prefer:
+
 ```
 git clone https://github.com/SpysyWeeb/op-model-grader && cd op-model-grader
 python3 -m venv .venv && . .venv/bin/activate   # or: uv venv && . .venv/bin/activate
