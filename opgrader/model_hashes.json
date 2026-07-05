@@ -1,0 +1,18 @@
+{
+  "659727c4d4839adc4992a254409a54259a8756a743f2d567bf5fdc6579f8009b": {
+    "name": "CD210 (combined onnx)",
+    "source": "https://github.com/commaai/openpilot/pull/38173 (driving_supercombo.onnx; combined from driving_on_policy.onnx + driving_vision.onnx whose LFS blobs are byte-identical to PR #37050 'CD210 model')"
+  },
+  "471f372751d5931e939320c211e35b7255f8fa8015125b3b3fd48ef43020257e": {
+    "name": "openpilot 'big' combined driving model (vision/policy provenance unverified)",
+    "source": "https://github.com/commaai/openpilot/pull/38173 (big_driving_supercombo.onnx)"
+  },
+  "78477124cbf3ffe30fa951ebada8410b43c4242c6054584d656f1d329b067e15": {
+    "name": "CD210 driving_policy",
+    "source": "https://github.com/commaai/openpilot/pull/37050 ('CD210 model', merged 2026-02-04)"
+  },
+  "ee29ee5bce84d1ce23e9ff381280de9b4e4d96d2934cd751740354884e112c66": {
+    "name": "CD210 driving_vision",
+    "source": "https://github.com/commaai/openpilot/pull/37050 ('CD210 model', merged 2026-02-04)"
+  }
+}
