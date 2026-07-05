@@ -43,6 +43,7 @@ def make_drive(
         "ccSteeringAngleDeg": 0.0,
         "ccAccel": 0.0,
         "aTarget": 0.0,
+        "desiredCurvature": 0.0,
     }
     bools = {
         "gasPressed": False,
@@ -63,7 +64,7 @@ def make_drive(
         d.channels[k] = Channel(t.copy(), arr(k, dv, np.float64))
     for k, dv in bools.items():
         d.channels[k] = Channel(t.copy(), arr(k, dv, np.bool_))
-    ints = {"personality": 1}  # standard, unless a test overrides
+    ints = {"personality": 1, "planSource": 1}  # standard / lead0 unless overridden
     for k, dv in ints.items():
         d.channels[k] = Channel(t.copy(), arr(k, dv, np.int16))
     d.meta.vm_params = {

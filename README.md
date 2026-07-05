@@ -155,6 +155,31 @@ model for steering and as *you* for gas/brake — exactly what you want. Events
 with mixed control over their window are discarded. Old logs without the
 per-axis flags fall back to the single `enabled` flag (noted in the report).
 
+### Plan vs You (counterfactual)
+
+plannerd/modeld keep running while you drive manually, so the logs carry the
+model's live intent during all of your own driving — where interveners have
+the most data. The report's "Plan vs You" section compares that plan to what
+you actually did, unscored and separate from the grades (the plan is
+conditioned on the situation you created; timing comparisons are robust,
+magnitudes indicative):
+
+- **Path agreement** — RMS lateral-accel disagreement between planned and
+  actual curvature per speed bin, over your steering.
+- **Counterfactual turn-in** — on your intersection turns (including
+  always-on-lateral turns the model missed and you executed): would the
+  model have turned in later than you, and how often did it *never* plan
+  the turn at all (planned curvature never reaching 30% of your peak)?
+- **Counterfactual unwind** — would the plan straighten out of sharp turns
+  earlier/later than you did?
+- **Braking / launch onset** — behind a lead, when would the planned accel
+  have crossed −0.5 / +0.3 m/s² vs your actual response? Stops without a
+  lead are skipped: with cruise unset the plan only reliably brakes when a
+  lead (or the e2e model in experimental mode) constrains it.
+- **Follow-gap opinion** — on samples where the lead constraint provably
+  binds (longitudinalPlanSource = lead), your held gap vs the target the
+  plan pursues.
+
 ### Mode & personality breakdowns
 
 Experimental/chill mode and the longitudinal personality are tracked **per
