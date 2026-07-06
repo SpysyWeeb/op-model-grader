@@ -365,8 +365,6 @@ def _pingpong_card(cat: CategoryResult) -> str:
         rows = []
         for b in bs:
             score = f"{b.score:.0f}" if b.score is not None else "–"
-            if b.score is not None and b.abs_scored:
-                score += '<span class="muted">*</span>'  # absolute anchors, no manual baseline
             manual_rms = _fmt(b.manual_rms)
             manual_rev = _fmt(b.manual_rev, 1)
             if b.pooled_n > 0:
@@ -406,14 +404,13 @@ def _pingpong_card(cat: CategoryResult) -> str:
   {sub_html}
   <p class="muted">Oscillation = the fast (&lt;~4 s) component of the steering angle — the wheel
   sawing back and forth — with the slow intended path (turns, road-following) and sensor noise
-  removed; reversals counted when the swing between extrema exceeds 3°. Reversal RATE is the main
-  ping-pong signal (how fast the wheel saws); a steady model runs ~1–2 reversals/min on the highway.
-  A bin needs ≥30 s engaged to score. With ≥30 s of your own manual steering in that bin it is scored
-  as a ratio to your driving; without it (you rarely hand-steer at speed) the bin is scored on
-  absolute anchors instead — marked <strong>*</strong> — with reversal rate weighted double the
-  amplitude. Category score is the engaged-time-weighted mean of bin scores. "w/ +N pooled" means the
-  manual baseline for that bin also draws on N other routes from your driver profile (model/engaged
-  data is never pooled, only your own driving).</p>"""
+  removed; reversals counted when the swing between extrema exceeds 3°. Every bin (≥30 s engaged) is
+  scored on <strong>absolute anchors</strong> — not relative to your own driving — set to the quietest
+  oscillation seen across the calibration routes, so the bar is "the least ping-pong possible".
+  Amplitude and reversal rate count equally, so the large but slower swings at low speed count as much
+  as the fast sawing at speed. Low speed tolerates bigger swings (parking is legitimately busy); the
+  <strong>your-column</strong> is shown as context only. Category score leans on the worst bin (a
+  ping-pong hotspot in one speed range isn't averaged away by calm driving elsewhere).</p>"""
 
 
 def _breakdown_tables(breakdowns: dict) -> str:
@@ -703,15 +700,16 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
     "Ping-Pong": (
         "The wheel sawing back and forth by speed range — fast oscillation only (a "
         "back-and-forth in under ~4 s; a slower weave is the car holding a curving "
-        "road, not hunting). Reversal rate (flips per minute over 3°) is the main "
-        "signal for how fast it saws; oscillation RMS is the amplitude. Bins where you "
-        "have manual steering are scored against your own driving; faster bins where "
-        "you don't are scored on absolute anchors (marked *) instead.",
+        "road, not hunting). Every bin is scored on absolute anchors set to the "
+        "quietest steering seen in the calibration data — the standard is the least "
+        "ping-pong possible, not relative to your own driving. Amplitude and reversal "
+        "rate count equally, so low speed's big slow swings weigh as much as fast "
+        "highway sawing. Note: at low speed this can't fully separate ping-pong from "
+        "legitimate maneuvering (parking, tight turns), so those bins read as 'how "
+        "busy the wheel was' as much as pure ping-pong.",
         "Hands-off engaged (or AOL) steering at a variety of speeds — touching the "
-        "wheel excludes those moments from the model's data. The clearest signal is "
-        "highway speed, where a good model should hold a rock-steady line; low-speed "
-        "creep (parking, tight corners) legitimately involves big steering, so those "
-        "bins lean on your own manual driving as the baseline.",
+        "wheel excludes those moments from the model's data. The cleanest signal is "
+        "highway speed, where a good model should hold a rock-steady line.",
     ),
     "Turns": (
         "Everything about how turns are carried out: unwind quality after the apex, "
@@ -1155,9 +1153,11 @@ def render_report(analysis, out_path: str | Path) -> Path:
   sharp turn = peak ≥ 90° with onset speed &lt; 15 mph; positive angle = left (ISO). Commanded angle =
   VehicleModel(carParams).get_steer_from_curvature(−actuators.curvature, vEgo). Ping-pong band =
   smooth(0.3 s) − smooth(2 s) of the steering angle (keeps only the fast &lt;~4 s back-and-forth, drops
-  slow road-following and sensor noise), per speed bin, standstill and steeringPressed excluded; bins
-  without ≥30 s of manual steering are scored on absolute anchors (reversal rate weighted 2× amplitude)
-  rather than a ratio.
+  slow road-following and sensor noise), per speed bin, standstill and steeringPressed excluded. Every
+  bin (≥30 s engaged) is scored on absolute anchors — RMS osc and reversal rate weighted equally, each
+  anchored so 100 = the quietest value seen across the calibration routes — not a ratio to your own
+  driving; the category leans on the worst bin. Low-speed bins can't fully separate ping-pong from
+  legitimate maneuvering (this fork logs no yaw rate), so read them as wheel-busyness.
   <strong>Peak turn-in effort</strong> (Turns, shown not scored) is the highest
   |controlsState.lateralControlState.torqueState.output| reached from turn onset up to the instant you
   first touched the wheel (steeringPressed), or across the whole episode if you never did — deliberately

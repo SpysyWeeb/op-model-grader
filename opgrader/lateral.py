@@ -77,27 +77,29 @@ PP_WORST_WINDOW_S = 10.0
 # badly in one speed range but is calm elsewhere should not average that away.
 PP_WORST_BLEND = 0.4
 
-# The REAL fix: bins with no manual baseline (you rarely hand-steer above
-# ~20 mph) could never be scored, so ping-pong at speed was invisible in the
-# grade even though the metric measured it. These absolute anchors (osc RMS
-# deg, reversal rate /min at 100/50/0) score such bins directly. Applied only
-# to 10-20 mph and up: below that, tight low-speed maneuvering (parking) looks
-# identical to ping-pong on any hands-off metric and genuinely needs the
-# human ratio baseline. Calibrated from 3 real Palisade routes / 73 segments
-# (tight-window pooled): a steady model runs ~1-2 reversals/min on the highway
-# and 5-35/min in town; genuine fast ping-pong pushes reversal rate well above
-# that (route 27: 50/min at 10-20, individual episodes 60+). Reversal rate is
-# weighted as the primary signal; amplitude is secondary (it double-counts
-# legitimate maneuvering at low speed). Keyed by the (lo, hi) mph tuple.
-PP_ABS_REV_ANCHORS: dict[tuple[float, float], tuple[float, float, float]] = {
-    (10, 20): (20.0, 45.0, 75.0),
-    (20, 35): (5.0, 20.0, 40.0),
-    (35, 55): (3.0, 15.0, 30.0),
-}
+# Ping-pong is scored on ABSOLUTE anchors at EVERY speed, not relative to your
+# own driving: the owner wants the standard to be "the least ping-pong
+# possible", and a ratio to your own steering is too lenient (you saw big at
+# low speed while parking, so a sawing model scored fine). Each bin's 100
+# anchor is the QUIETEST band osc RMS (deg) / reversal rate (/min) the agents
+# found in that bin across 3 real Palisade routes / 73 segments; 0 is the
+# worst (p90). Low speeds are large-amplitude but slower (0-5: ~4-12 deg, 25-55
+# rev/min); highway is near-zero. Amplitude and reversal rate score equally, so
+# 0-5's big bidirectional swings count even though they saw slower. Keyed by
+# the (lo, hi) mph tuple exactly as it appears in PP_BINS_MPH.
 PP_ABS_RMS_ANCHORS: dict[tuple[float, float], tuple[float, float, float]] = {
-    (10, 20): (2.5, 5.5, 9.0),
-    (20, 35): (1.0, 2.8, 5.0),
-    (35, 55): (0.6, 1.6, 3.0),
+    (0, 5): (4.5, 8.0, 12.0),
+    (5, 10): (4.5, 8.5, 13.0),
+    (10, 20): (1.0, 4.0, 8.5),
+    (20, 35): (0.3, 1.2, 2.5),
+    (35, 55): (0.2, 0.7, 1.5),
+}
+PP_ABS_REV_ANCHORS: dict[tuple[float, float], tuple[float, float, float]] = {
+    (0, 5): (25.0, 40.0, 55.0),
+    (5, 10): (40.0, 62.0, 85.0),
+    (10, 20): (10.0, 40.0, 75.0),
+    (20, 35): (3.0, 13.0, 26.0),
+    (35, 55): (2.0, 8.0, 15.0),
 }
 
 INTENT_MAX_V = 20 * MPH  # 8.9 m/s
@@ -616,32 +618,25 @@ def analyze_pingpong(
         for i, (lo, hi) in enumerate(edges):
             b = PingPongBin(lo, hi)
             b.engaged_rms, b.engaged_rev, b.engaged_s = finish(accs[("engaged", i)])
+            # manual side kept for display context only -- ping-pong is scored
+            # absolutely now, not relative to your driving
             b.manual_rms, b.manual_rev, b.manual_s = finish(accs[("manual", i)])
-            if b.engaged_s < min_s or b.engaged_rms is None:
+            anch_rms = PP_ABS_RMS_ANCHORS.get((lo, hi))
+            anch_rev = PP_ABS_REV_ANCHORS.get((lo, hi))
+            if b.engaged_s < min_s or b.engaged_rms is None or anch_rms is None:
+                # too little data, or a 1 mph sub-bin (no anchors) -> unscored
                 out.append(b)
                 continue
-            if b.manual_s >= min_s and b.manual_rms is not None:
-                # ratio vs your own steering in this bin -- rms and reversal
-                # rate weighted equally
-                s_rms = score_fn(b.engaged_rms, b.manual_rms)
-                s_rev = (score_fn(b.engaged_rev, b.manual_rev)
-                         if b.engaged_rev is not None and b.manual_rev is not None else None)
-                parts = [(s, 1.0) for s in (s_rms, s_rev) if s is not None]
-            elif (lo, hi) in PP_ABS_REV_ANCHORS:
-                # no manual baseline -> absolute anchors. Reversal RATE is the
-                # primary "how fast the wheel saws" ping-pong signal (weight 2);
-                # amplitude is secondary (weight 1 -- it double-counts the big
-                # but legitimate steering of low-speed maneuvering).
-                s_rev = (score_absolute(b.engaged_rev, PP_ABS_REV_ANCHORS[(lo, hi)])
-                         if b.engaged_rev is not None else None)
-                s_rms = (score_absolute(b.engaged_rms, PP_ABS_RMS_ANCHORS[(lo, hi)])
-                         if b.engaged_rms is not None else None)
-                parts = [(s, w) for s, w in ((s_rev, 2.0), (s_rms, 1.0)) if s is not None]
-                b.abs_scored = True
-            else:
-                parts = []
+            # absolute anchors, amplitude and reversal rate weighted EQUALLY:
+            # low-speed ping-pong is large-amplitude but saws slower, so the
+            # amplitude signal has to count as much as the reversal rate.
+            s_rms = score_absolute(b.engaged_rms, anch_rms)
+            s_rev = (score_absolute(b.engaged_rev, anch_rev)
+                     if b.engaged_rev is not None and anch_rev is not None else None)
+            parts = [s for s in (s_rms, s_rev) if s is not None]
+            b.abs_scored = True
             if parts:
-                b.score = float(sum(s * w for s, w in parts) / sum(w for _, w in parts))
+                b.score = float(np.mean(parts))
             out.append(b)
         return out
 

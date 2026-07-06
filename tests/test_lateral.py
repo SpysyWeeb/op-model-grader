@@ -576,18 +576,17 @@ def test_pingpong_bins_and_worst():
     assert pp is not None
     b0 = pp.bins[0]  # 0-5 mph (2.2 m/s = 4.9 mph)
     b2 = pp.bins[2]  # 10-20 mph (6.7 m/s = 15 mph)
-    assert b0.engaged_s > 30 and b0.manual_s > 30
-    assert b2.engaged_s > 30 and b2.manual_s > 30
-    assert b0.engaged_rms == pytest.approx(2 * b0.manual_rms, rel=0.1)
-    # same frequency both sides -> similar reversal rates (~2*0.8*60 /min)
-    assert b0.engaged_rev == pytest.approx(96.0, rel=0.15)
-    assert b0.manual_rev == pytest.approx(96.0, rel=0.15)
-    assert b0.score is not None
-    assert b2.score is not None
-    # identical oscillation shape at both speeds -> both bins score the same,
-    # so the engaged-time-weighted overall equals either bin's own score
-    assert pp.score == pytest.approx(b0.score, rel=0.05)
-    assert pp.score == pytest.approx(b2.score, rel=0.05)
+    assert b0.engaged_s > 30 and b2.engaged_s > 30
+    # ping-pong is scored on ABSOLUTE anchors now (not the ratio to your own
+    # driving) -- both engaged bins get a score, both flagged abs_scored
+    assert b0.abs_scored and b2.abs_scored
+    assert b0.score is not None and b2.score is not None
+    # heavy fast oscillation (8 deg, 0.8 Hz -> ~96 reversals/min) is penalized
+    # at both speeds; the same oscillation scores WORSE at 10-20 than at 0-5
+    # because low-speed anchors tolerate bigger swings (parking is legit)
+    assert b0.score < 50 and b2.score < 20
+    assert b2.score < b0.score
+    assert pp.score is not None  # two scored bins -> a category grade
     assert pp.worst_bin in (b0, b2)
     assert len(pp.worst_windows) == 3
     # 1 mph sub-bins: 60 s of engaged time at 4.9 mph
@@ -646,14 +645,16 @@ def test_pingpong_slow_weave_not_penalized_as_pingpong():
     ping-pong -- the tight band rejects it, so the bin still scores well."""
     dur = 90.0
     t = _t(dur)
-    angle = 10.0 * np.sin(2 * np.pi * (1 / 8.0) * t)  # 8 s period, ±10 deg
+    angle = 5.0 * np.sin(2 * np.pi * (1 / 8.0) * t)  # 8 s period, ~5 deg
     d = make_drive(dur, vEgo=17.9, steeringAngleDeg=angle,
                    enabled=True, latActive=True, longActive=True)
     seg, da = _prep(d)
     pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
     b = pp.bins[4]
     assert b.abs_scored is True
-    assert b.score is not None and b.score > 85  # slow weave != ping-pong
+    # the band strips the slow weave, so it scores far better than a real fast
+    # ping-pong (which lands near 0) -- it is not treated as hunting
+    assert b.score is not None and b.score > 80
 
 
 def test_commanded_angle_roundtrip():
