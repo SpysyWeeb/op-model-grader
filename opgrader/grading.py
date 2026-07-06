@@ -60,9 +60,16 @@ ALL_BUCKETS = MODE_BUCKETS + PERSONALITY_BUCKETS
 
 CATEGORY_GROUPS = {
     "Lateral": {
+        # Card order = dict order (see grade()'s "grp.categories = [cats[c]
+        # for c in weights]"), which also drives report.py's multi-column
+        # card packing. Turns is by far the tallest card in this group (it
+        # absorbed two former categories), so it's placed LAST -- CSS
+        # multi-column fills columns in strict content order, so the two
+        # short cards need to come first to end up packed together in one
+        # column instead of Turns splitting them across columns.
         "Ping-Pong": 0.40,
-        "Turns": 0.50,
         "General Smoothness": 0.10,
+        "Turns": 0.50,
     },
     "Longitudinal": {
         "Smoothness": 0.25,
