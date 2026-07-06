@@ -49,7 +49,7 @@ from pathlib import Path
 import numpy as np
 
 from .grading import METRICS, MIN_EVENTS, add_turn_samples, collect_samples
-from .lateral import PP_MIN_BIN_S, PingPongResult, analyze_pingpong
+from .lateral import PP_MIN_BIN_S, PingPongResult, analyze_pingpong, pp_category_score
 
 DATA_DIR = Path(os.environ.get("OPGRADER_DATA", "~/.local/share/opgrader")).expanduser()
 PROFILE_FILE = DATA_DIR / "profile.json"
@@ -229,6 +229,13 @@ def _pool_pingpong(pp: PingPongResult, pooled: dict[str, dict[str, list[float]]]
     never touched.
     """
     for b in pp.bins:
+        # Absolute-anchor bins (ping-pong at speed) are judged on a fixed
+        # standard, NOT relative to your driving -- pooling a manual baseline
+        # in and re-scoring as a ratio would wash the anchors out (a model
+        # that saws less than you do while hand-maneuvering would score 100).
+        # Leave them exactly as analyze_pingpong scored them.
+        if b.abs_scored:
+            continue
         label = _pp_bin_label(b.lo_mph, b.hi_mph)
         rms_pool = pooled.get(PINGPONG_RMS_KEY, {}).get(label, [])
         rev_pool = pooled.get(PINGPONG_REV_KEY, {}).get(label, [])
@@ -255,12 +262,11 @@ def _pool_pingpong(pp: PingPongResult, pooled: dict[str, dict[str, list[float]]]
         b.pooled_manual_rms = combined_rms
         b.pooled_manual_rev = combined_rev
 
-    scored = [b for b in pp.bins if b.score is not None]
-    if scored:
-        w = np.array([b.engaged_s for b in scored])
-        s = np.array([b.score for b in scored])
-        pp.score = float(np.sum(w * s) / np.sum(w))
-        pp.worst_bin = min(scored, key=lambda b: b.score)
+    # re-aggregate through the shared helper (worst-bin emphasis +
+    # MIN_SCORED_FOR_CATEGORY gate), so pooled and non-pooled runs agree
+    new_score, new_worst = pp_category_score(pp.bins)
+    if new_score is not None:
+        pp.score, pp.worst_bin = new_score, new_worst
 
 
 def pool_for_grading(an, per_drive, pp_score_fn, save: bool = True) -> tuple[ProfileSummary, dict]:

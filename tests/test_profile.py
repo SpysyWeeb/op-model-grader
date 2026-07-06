@@ -265,7 +265,30 @@ def test_pingpong_pool_rescues_thin_bin():
     assert b.pooled_n == 3
     assert b.score is not None  # rescued: 3 pooled >= MIN_EVENTS, engaged_s ok
     assert b.pooled_manual_rms == pytest.approx(2.0)
-    assert pp.score == pytest.approx(b.score)
+    # ...but one scored bin is below MIN_SCORED_FOR_CATEGORY, so still no
+    # category score (the pooled path now honors that gate like everywhere else)
+    assert pp.score is None
+
+
+def test_pingpong_pool_does_not_override_absolute_bin():
+    """Bins scored on absolute anchors (ping-pong at speed) must keep their
+    score even when pooled manual history exists -- pooling one in as a ratio
+    would wash the anchors out. Regression: with a driver profile loaded, a
+    sawing model scored 100 because it saws less than the human hand-parks."""
+    def lenient(m, d):  # a ratio that would hand out 100
+        return 100.0
+
+    b1 = PingPongBin(lo_mph=10, hi_mph=20, engaged_s=300.0, manual_s=0.0,
+                     engaged_rms=5.0, engaged_rev=40.0, score=57.0, abs_scored=True)
+    b2 = PingPongBin(lo_mph=20, hi_mph=35, engaged_s=300.0, manual_s=0.0,
+                     engaged_rms=1.5, engaged_rev=10.0, score=84.0, abs_scored=True)
+    pp = PingPongResult(bins=[b1, b2], sub_bins=[], score=None, worst_bin=None)
+    pooled = {P.PINGPONG_RMS_KEY: {"10-20mph": [9.0] * 8},
+              P.PINGPONG_REV_KEY: {"10-20mph": [40.0] * 8}}
+    P._pool_pingpong(pp, pooled, lenient)
+    assert b1.score == pytest.approx(57.0)  # absolute score preserved, NOT 100
+    assert b1.pooled_n == 0  # absolute bins aren't pooled into at all
+    assert pp.score is not None and pp.score < 84.0  # worst bin (57) pulls it down
 
 
 def test_pingpong_pool_leaves_unpooled_bin_untouched():

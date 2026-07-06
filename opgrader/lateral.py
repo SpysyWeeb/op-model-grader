@@ -72,6 +72,10 @@ PP_SWING_DEG = 3.0  # min swing between extrema to count a reversal
 PP_MIN_BIN_S = 30.0  # per side, to score a speed bin
 PP_SUB_BIN_MIN_S = 60.0  # engaged seconds needed for a 1 mph sub-bin row
 PP_WORST_WINDOW_S = 10.0
+# Category score = PP_WORST_BLEND * worst bin + (1-PP_WORST_BLEND) * the
+# engaged-time-weighted mean. Ping-pong is felt as episodes: a route that saws
+# badly in one speed range but is calm elsewhere should not average that away.
+PP_WORST_BLEND = 0.4
 
 # The REAL fix: bins with no manual baseline (you rarely hand-steer above
 # ~20 mph) could never be scored, so ping-pong at speed was invisible in the
@@ -508,6 +512,23 @@ class PingPongResult:
     worst_windows: list[Event] = field(default_factory=list)
 
 
+def pp_category_score(bins) -> tuple[float | None, "PingPongBin | None"]:
+    """Ping-pong category score from the scored bins: the engaged-time-
+    weighted mean blended toward the WORST bin (PP_WORST_BLEND), so a genuine
+    ping-pong hotspot in one speed range isn't diluted away by calm driving
+    elsewhere. None until >= MIN_SCORED_FOR_CATEGORY bins are scored. Shared by
+    analyze_pingpong and the driver-profile re-aggregation so both agree."""
+    scored = [b for b in bins if b.score is not None]
+    if len(scored) < MIN_SCORED_FOR_CATEGORY:
+        return None, None
+    w = np.array([b.engaged_s for b in scored], float)
+    s = np.array([b.score for b in scored], float)
+    twm = float(np.sum(w * s) / np.sum(w))
+    worst = min(scored, key=lambda b: b.score)
+    score = PP_WORST_BLEND * worst.score + (1.0 - PP_WORST_BLEND) * twm
+    return score, worst
+
+
 def _pp_accumulate(t, resid, v, base_mask, lo, hi, acc):
     """Accumulate sum-of-squares, duration and reversals for one speed bin."""
     m = base_mask & (v >= lo * MPH) & (v < hi * MPH)
@@ -630,15 +651,7 @@ def analyze_pingpong(
         if b.engaged_s >= PP_SUB_BIN_MIN_S
     ]
 
-    scored = [b for b in bins if b.score is not None]
-    if len(scored) >= MIN_SCORED_FOR_CATEGORY:
-        w = np.array([b.engaged_s for b in scored])
-        s = np.array([b.score for b in scored])
-        score = float(np.sum(w * s) / np.sum(w))
-        worst = min(scored, key=lambda b: b.score)
-    else:
-        score, worst = None, None
-
+    score, worst = pp_category_score(bins)
     windows.sort(key=lambda p: -p[0])
     return PingPongResult(bins, sub_bins, score, worst, [e for _r, e in windows[:3]])
 

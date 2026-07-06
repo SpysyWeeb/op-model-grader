@@ -675,3 +675,19 @@ def test_commanded_angle_roundtrip():
     assert back == pytest.approx(sa, rel=1e-9)
     assert vehicle_model_from_params({}) is None
     assert vehicle_model_from_params({"mass": 0.0}) is None
+
+
+def test_pp_category_score_blends_toward_worst():
+    from opgrader.lateral import PP_WORST_BLEND, PingPongBin, pp_category_score
+    good = PingPongBin(0, 5, engaged_s=100.0, score=100.0)
+    bad = PingPongBin(10, 20, engaged_s=100.0, score=50.0)
+    score, worst = pp_category_score([good, bad])
+    twm = 75.0  # equal engaged time -> plain mean is 75
+    assert score == pytest.approx(PP_WORST_BLEND * 50 + (1 - PP_WORST_BLEND) * twm)
+    assert worst is bad
+    assert score < twm  # worst-bin emphasis pulls below the plain time-weighted mean
+
+
+def test_pp_category_score_needs_two_bins():
+    from opgrader.lateral import PingPongBin, pp_category_score
+    assert pp_category_score([PingPongBin(0, 5, engaged_s=100.0, score=90.0)]) == (None, None)
