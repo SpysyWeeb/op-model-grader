@@ -897,7 +897,7 @@ def _header_facts(drives, buckets, analysis=None) -> list[tuple[str, str]]:
         ("Routes", ", ".join(routes)),
         ("Car", ", ".join(fingerprints)),
         ("openpilot", ", ".join(versions) or "unknown"),
-        ("Model, both axes", f"{buckets['both'] / 60:.1f} min"),
+        ("Model, Lat & Long", f"{buckets['both'] / 60:.1f} min"),
         ("Lat-only (AOL/MADS)", f"{buckets['lat_only'] / 60:.1f} min"),
         ("Long-only", f"{buckets['long_only'] / 60:.1f} min"),
         ("Fully manual", f"{buckets['manual'] / 60:.1f} min"),
