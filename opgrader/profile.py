@@ -4,8 +4,8 @@
 and your car, not any one route. This module accumulates your MANUAL-driving
 samples (the driver side of every ratio metric) across every route you've
 ever graded, keyed by car fingerprint, and lets future grades borrow that
-history to fill out thin per-route baselines (Launch, Turn-In Timing, and
-low-speed Ping-Pong bins are the ones that run dry on a single drive).
+history to fill out thin per-route baselines (Launch, Turns, and low-speed
+Ping-Pong bins are the ones that run dry on a single drive).
 
 Storage is route-atomic: each stored route is a self-contained JSON blob
 keyed by its route id, so re-grading the same route replaces its entry

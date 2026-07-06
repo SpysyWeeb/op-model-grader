@@ -286,7 +286,12 @@ def _metric_rows(metrics: list[MetricResult], row_overrides: dict | None = None)
     like any other number; a "_txt" value is used verbatim, for a fixed
     reference string like "0.00 (reference)"). Either side of a pair can be
     overridden independently -- the other falls back to normal rendering.
-    Keeps the shared renderer ignorant of any one specific metric."""
+    Keeps the shared renderer ignorant of any one specific metric.
+
+    A metric with `desc` set renders as a clickable row (a small "▸" cue,
+    cursor:pointer, matching the existing tr.evrow drill-down convention)
+    that reveals a hidden explanation row below it on click -- see the
+    tr.hasdesc rule in _CSS and the click handler in _JS."""
     row_overrides = row_overrides or {}
     rows = []
     for m in metrics:
@@ -308,6 +313,16 @@ def _metric_rows(metrics: list[MetricResult], row_overrides: dict | None = None)
             you_txt = _driver_cell(m)
         if ov.get("n") and ("you_deg" in ov or "you_txt" in ov):
             you_txt += f' <span class="muted">(n={ov["n"]})</span>'
+
+        icon = '<span class="rowinfo">▸</span>' if d.desc else ""
+        if d.desc:
+            desc_id = f"desc-{d.key}"
+            tr_attrs = f' data-desc-id="{desc_id}"'
+            desc_row = f'<tr class="descrow" id="{desc_id}"><td colspan="5">{_esc(d.desc)}</td></tr>'
+        else:
+            tr_attrs = ""
+            desc_row = ""
+
         if d.scorer == "none":
             # show_unscored=True got it past the hide rule above, but it's
             # still not a grade -- "insufficient data" below would be a lie
@@ -315,25 +330,28 @@ def _metric_rows(metrics: list[MetricResult], row_overrides: dict | None = None)
             note = d.note or "not scored"
             if m.n_model == 0:
                 note = "no data"
+            cls = "hasdesc insuff" if d.desc else "insuff"
             rows.append(
-                f'<tr class="insuff"><td>{_esc(d.label)}</td>'
+                f'<tr class="{cls}"{tr_attrs}><td>{_esc(d.label)}{icon}</td>'
                 f"<td>{model_txt}</td><td>{you_txt}</td>"
-                f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
+                f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>{desc_row}"
             )
         elif m.score is None:
             need_d = " each" if d.needs_driver else ""
             note = f"insufficient data (model n={m.n_model}, you n={m.n_driver}, need ≥3{need_d})"
+            cls = "hasdesc insuff" if d.desc else "insuff"
             rows.append(
-                f'<tr class="insuff"><td>{_esc(d.label)}</td>'
+                f'<tr class="{cls}"{tr_attrs}><td>{_esc(d.label)}{icon}</td>'
                 f"<td>{model_txt}</td><td>{you_txt}</td>"
-                f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
+                f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>{desc_row}"
             )
         else:
             star = "*" if (d.scorer == "abs" or (d.scorer == "ratio_or_abs" and (m.n_driver < 3 or (m.driver_agg or 0) < (d.abs_when_driver_below or 0)))) else ""
+            cls = ' class="hasdesc"' if d.desc else ""
             rows.append(
-                f"<tr><td>{_esc(d.label)}{star}</td>"
+                f"<tr{cls}{tr_attrs}><td>{_esc(d.label)}{star}{icon}</td>"
                 f"<td>{model_txt}</td><td>{you_txt}</td>"
-                f"<td>{_esc(d.unit)}</td><td>{m.score:.0f}</td></tr>"
+                f"<td>{_esc(d.unit)}</td><td>{m.score:.0f}</td></tr>{desc_row}"
             )
     return "".join(rows)
 
@@ -699,33 +717,14 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "your own low-speed manual maneuvering naturally raises the human baseline "
         "there.",
     ),
-    "Turn Execution": (
-        "How turns finish. S-curve overshoot: after straightening, how far the wheel "
-        "swings past center the other way (as % of the turn's peak angle); recovery "
-        "wobbles counts extra swings; unwind rate is how quickly the wheel comes back "
-        "after the apex; driver-rescue rate is the share of model turns where you had "
-        "to grab the wheel (or it disengaged) during the straighten-out. Peak turn-in "
-        "effort is shown as extra context, not scored: the highest % of available "
-        "torque the model reached before you first touched the wheel (or across the "
-        "whole turn if you never did) — a rough answer to 'is the model actually "
-        "committing to this turn', though a low number isn't necessarily a flaw, since "
-        "some turns genuinely don't need much torque to execute.",
-        "When it's safe, let the model finish turns on its own — every rescue is "
-        "itself a data point, so intervening when needed still counts. Manual sharp "
-        "turns build the baseline it's compared against.",
-    ),
-    "Turn-In Timing": (
-        "Onset timing: how much later (+) or sooner (−) the model's commanded path "
-        "called for the turn vs. when the wheel actually turned in — that instant is "
-        "the 'You: 0.00' reference, so Model reads as a lead/lag against it; scored "
-        "on every engaged turn. Resisted divergence: only scores turns where you "
-        "genuinely fought the model's steering (opposing torque, sustained ≥ 0.3 s) "
-        "— Model/You show the angle each side actually held at the peak of the "
-        "disagreement, so you can see who wanted the sharper turn. No resistance "
-        "means no score on that row, not a zero.",
-        "Any turn sharpens the onset-timing rows. Resisted divergence specifically "
-        "needs moments you pushed back against the model's steering, not just "
-        "touched the wheel — never resisting means nothing to measure there.",
+    "Turns": (
+        "Everything about how turns are carried out: unwind quality after the apex, "
+        "how hard the model commits at turn-in, and how far it drifts from its own "
+        "plan when you resist it. Click any row below for what it specifically means.",
+        "Let the model finish turns on its own when it's safe to — every rescue is "
+        "itself a data point. Drive some sharp turns manually to build the comparison "
+        "baseline, and actually push back when the model's steering feels wrong: "
+        "resisted-divergence rows need real resistance, not just a hand on the wheel.",
     ),
     "General Smoothness": (
         "Overall steering comfort at speed: RMS lateral jerk is side-to-side "
@@ -791,7 +790,7 @@ _INITIATOR_LABELS = {
 
 
 def _turn_in_breakdown_table(cat: CategoryResult) -> str:
-    """Diagnostic-only texture for Turn-In Timing: who moved first, and (for
+    """Diagnostic-only texture for Turns: who moved first, and (for
     the episodes that DID have a scored conflict) the median divergence and
     torque-ceiling context. Never affects the score above."""
     bd = cat.extra.get("breakdown") if cat.extra else None
@@ -832,7 +831,7 @@ def _category_card(cat: CategoryResult) -> str:
         body = _pingpong_card(cat)
     else:
         row_overrides = None
-        if cat.name == "Turn-In Timing":
+        if cat.name == "Turns":
             row_overrides = {}
             angles = cat.extra.get("resisted_angles") if cat.extra else None
             if angles:
@@ -861,7 +860,7 @@ def _category_card(cat: CategoryResult) -> str:
             )
         if cat.name == "Speed Disagreement":
             body += _speed_disagreement_extras(cat)
-        if cat.name == "Turn-In Timing":
+        if cat.name == "Turns":
             body += _turn_in_breakdown_table(cat)
     help_html = ""
     if cat.name in CATEGORY_HELP:
@@ -1125,7 +1124,7 @@ def render_report(analysis, out_path: str | Path) -> Path:
   category) because there is no human counterpart or your baseline is ~zero.
   Letters: ≥93 A, ≥85 A−, ≥78 B+, ≥70 B, ≥60 C, ≥50 D, else F. Ratio metrics need ≥3 events per side.
   Longitudinal weights: Smoothness 0.25, Following 0.18, Stopping 0.17, Launch 0.15, Responsiveness 0.10, Speed Disagreement 0.15.
-  Lateral weights: Ping-Pong 0.40, Turn Execution 0.30, Turn-In Timing 0.20, General Smoothness 0.10.
+  Lateral weights: Ping-Pong 0.40, Turns 0.50, General Smoothness 0.10.
   Overall = ½ Longitudinal + ½ Lateral; empty categories/groups are dropped and weights renormalized.
   A local <strong>driver profile</strong> (~/.local/share/opgrader/profile.json by default) accumulates
   your manual-driving samples across every route you grade and blends them into "You" values above —
@@ -1165,14 +1164,14 @@ def render_report(analysis, out_path: str | Path) -> Path:
   sharp turn = peak ≥ 90° with onset speed &lt; 15 mph; positive angle = left (ISO). Commanded angle =
   VehicleModel(carParams).get_steer_from_curvature(−actuators.curvature, vEgo). Ping-pong = high-passed
   steering angle (minus centered 2 s mean), per speed bin, standstill and steeringPressed excluded.
-  <strong>Peak turn-in effort</strong> (Turn Execution, shown not scored) is the highest
+  <strong>Peak turn-in effort</strong> (Turns, shown not scored) is the highest
   |controlsState.lateralControlState.torqueState.output| reached from turn onset up to the instant you
   first touched the wheel (steeringPressed), or across the whole episode if you never did — deliberately
   stops there because torque_output changes once you take over (it may be fighting your input rather
   than executing its own plan at that point), so looking past that instant would misread a correction as
   an admission the model wasn't trying.
-  <strong>Turn-In Timing is blinker-free</strong>: it scores the same turn episodes as Turn Execution,
-  every engaged turn regardless of band. <strong>Cmd-onset timing</strong> is the model's own
+  <strong>Turns is blinker-free</strong>: every engaged turn is scored regardless of band, signaled or
+  not. <strong>Cmd-onset timing</strong> is the model's own
   commanded-angle 20° crossing minus the actual angle's 20° crossing — positive means the model's own
   plan called for the turn AFTER the wheel had already gotten there, negative means it called for the
   turn first. That crossing instant on the actual (wheel) side is the reference point the lead/lag is
@@ -1196,7 +1195,7 @@ def render_report(analysis, out_path: str | Path) -> Path:
   controlsState.lateralControlState.torqueState.saturated was False for every sample on both real
   routes tested, so ceiling detection is done by thresholding |torque_output| ourselves (CEILING_FRAC =
   0.92) rather than trusting that flag. <strong>Turn intents</strong> (a separate, unscored diagnostic
-  elsewhere in this report, NOT used for Turn-In Timing's grade): blinker on below 20 mph opens a window
+  elsewhere in this report, NOT used for Turns' grade): blinker on below 20 mph opens a window
   (blinker-on + 20 s or blinker-off + 5 s); |net heading| ≥ 45° = intersection turn, &lt; 20° = lane
   change, else ambiguous — this population still feeds the separate Plan-vs-You counterfactual turn-in
   section, whose definition of "missed"/"never planned" is blinker-gated and independent of the metric
@@ -1282,6 +1281,17 @@ tr:last-child td{border-bottom:none}
 tr.insuff td{color:var(--muted)}
 tr.bdcat td{color:var(--ink2);font-weight:600;border-top:2px solid var(--grid)}
 td.bdmetric{padding-left:14px}
+tr.hasdesc{cursor:pointer}
+tr.hasdesc:hover td{background:color-mix(in srgb, var(--model) 6%, transparent)}
+tr.hasdesc.open{background:color-mix(in srgb, var(--model) 4%, transparent)}
+.rowinfo{display:inline-block;margin-left:6px;color:var(--muted);font-size:.75em;transition:transform .15s}
+tr.hasdesc.open .rowinfo{transform:rotate(90deg)}
+tr.descrow{display:none}
+tr.descrow.open{display:table-row}
+tr.descrow td{color:var(--ink2);font-size:.92em;line-height:1.5;padding:2px 8px 12px 0}
+/* a hasdesc row followed by its own (possibly hidden) descrow is never
+   really the table's last row visually, even when descrow is last-child */
+tr.hasdesc:has(+ tr.descrow:last-child) td{border-bottom:none}
 .hists{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
 .histbox{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
 .legend{color:var(--ink2);font-size:.85em;margin:6px 0}
@@ -1372,5 +1382,13 @@ function showDrill(kind, idx, row){
 
 document.querySelectorAll('tr.evrow').forEach(row => {
   row.addEventListener('click', () => showDrill(row.dataset.kind, +row.dataset.idx, row));
+});
+
+document.querySelectorAll('tr.hasdesc').forEach(row => {
+  row.addEventListener('click', () => {
+    row.classList.toggle('open');
+    const d = document.getElementById(row.dataset.descId);
+    if (d) d.classList.toggle('open');
+  });
 });
 """

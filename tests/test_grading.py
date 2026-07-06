@@ -178,7 +178,7 @@ def test_score_ratio_match_penalizes_both_directions():
     assert score_ratio(0.25, 1.0, better="match") == 0.0
 
 
-# ------------------------------------------------------ Turn-In Timing (blinker-free)
+# ------------------------------------------------------------ Turns (blinker-free)
 
 
 def test_turn_in_delay_retired():
@@ -189,7 +189,7 @@ def test_turn_in_delay_retired():
 def test_cmd_onset_lead_scored_metric_defs():
     for key in ("cmd_onset_lead_left", "cmd_onset_lead_right"):
         d = METRIC_BY_KEY[key]
-        assert d.category == "Turn-In Timing"
+        assert d.category == "Turns"
         assert d.scorer == "abs"
         assert d.needs_driver is False
         assert d.abs_anchors == (0.0, 0.5, 1.5)

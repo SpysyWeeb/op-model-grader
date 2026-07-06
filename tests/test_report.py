@@ -71,7 +71,7 @@ def test_metric_rows_no_override_uses_normal_rendering():
     assert "80.00" in html
 
 
-def test_category_card_turn_in_timing_onset_lead_shows_reference_you():
+def test_category_card_turns_onset_lead_shows_reference_you():
     """cmd_onset_lead's 'You' is always exactly 0.00 by construction (the
     lead/lag is measured relative to when the wheel itself turned in) --
     _category_card must wire that reference text in, not leave the normal
@@ -79,19 +79,60 @@ def test_category_card_turn_in_timing_onset_lead_shows_reference_you():
     d = METRIC_BY_KEY["cmd_onset_lead_left"]
     m = MetricResult(definition=d, model_vals=[0.3, 0.4, 0.5], driver_vals=[])
     m.model_agg, m.score = 0.4, 62.0
-    cat = CategoryResult(name="Turn-In Timing", weight=0.20, metrics=[m])
+    cat = CategoryResult(name="Turns", weight=0.50, metrics=[m])
     html = _category_card(cat)
     assert "0.00" in html and "reference" in html
     assert "0.40" in html  # the real model_agg is untouched
 
 
-def test_category_card_turn_in_timing_resisted_angles_wired_from_extra():
+def test_category_card_turns_resisted_angles_wired_from_extra():
     d = METRIC_BY_KEY["resisted_divergence_left"]
     m = MetricResult(definition=d, model_vals=[70.0, 80.0, 90.0], driver_vals=[])
     m.model_agg, m.score = 80.0, 51.0
     cat = CategoryResult(
-        name="Turn-In Timing", weight=0.20, metrics=[m],
+        name="Turns", weight=0.50, metrics=[m],
         extra={"resisted_angles": {"left": {"model_deg": 82.3, "you_deg": 45.1, "n": 12}}},
     )
     html = _category_card(cat)
     assert "82.30" in html and "45.10" in html and "(n=12)" in html
+
+
+def test_metric_rows_desc_renders_clickable_row_with_hidden_desc_row():
+    """A metric with `desc` set gets a clickable row (hasdesc class, a
+    rowinfo cue icon, a data-desc-id) plus a matching hidden descrow
+    holding the explanation text -- the click-to-expand mechanism."""
+    d = METRIC_BY_KEY["turn_effort_left"]
+    assert d.desc  # sanity: this metric is expected to carry a description
+    m = MetricResult(definition=d, model_vals=[40.0, 60.0, 90.0], driver_vals=[])
+    m.model_agg = 60.0
+    html = _metric_rows([m])
+    assert 'class="hasdesc insuff"' in html
+    assert 'data-desc-id="desc-turn_effort_left"' in html
+    assert '<span class="rowinfo">' in html
+    assert 'id="desc-turn_effort_left"' in html
+    assert "highest % of available steering torque" in html  # the desc text itself, apostrophe-free substring
+
+
+def test_metric_rows_no_desc_renders_plain_row_no_click_affordance():
+    d = METRIC_BY_KEY["rms_jerk"]
+    assert d.desc == ""  # sanity: this metric has no description authored
+    m = MetricResult(definition=d, model_vals=[0.1, 0.2, 0.3], driver_vals=[0.1, 0.2, 0.3])
+    m.model_agg, m.driver_agg, m.score = 0.2, 0.2, 100.0
+    html = _metric_rows([m])
+    assert "hasdesc" not in html
+    assert "rowinfo" not in html
+    assert "descrow" not in html
+
+
+def test_metric_rows_desc_star_ordering_scored_row():
+    """The abs-scoring asterisk must read before the click cue (Label*▸),
+    not after (Label▸*) -- the star is scoring metadata, the icon is a UI
+    affordance, and label*-then-icon is the natural reading order."""
+    d = METRIC_BY_KEY["resisted_divergence_left"]
+    assert d.desc and d.scorer == "abs"
+    m = MetricResult(definition=d, model_vals=[70.0, 80.0, 90.0], driver_vals=[])
+    m.model_agg, m.score = 80.0, 51.0
+    html = _metric_rows([m])
+    star_idx = html.index("*")
+    icon_idx = html.index('<span class="rowinfo">')
+    assert star_idx < icon_idx

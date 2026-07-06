@@ -3,8 +3,7 @@
 Two top-level groups, each with its own headline grade:
 - Longitudinal: Smoothness 0.25, Following 0.18, Stopping 0.17,
   Launch 0.15, Responsiveness 0.10, Speed Disagreement 0.15
-- Lateral: Ping-Pong 0.40, Turn Execution 0.30, Turn-In Timing 0.20,
-  General Smoothness 0.10
+- Lateral: Ping-Pong 0.40, Turns 0.50, General Smoothness 0.10
 Overall = 0.5*Longitudinal + 0.5*Lateral (renormalized if a group has no data).
 
 Relative (ratio) scoring, lower-is-better unless stated: with m = model
@@ -62,8 +61,7 @@ ALL_BUCKETS = MODE_BUCKETS + PERSONALITY_BUCKETS
 CATEGORY_GROUPS = {
     "Lateral": {
         "Ping-Pong": 0.40,
-        "Turn Execution": 0.30,
-        "Turn-In Timing": 0.20,
+        "Turns": 0.50,
         "General Smoothness": 0.10,
     },
     "Longitudinal": {
@@ -111,6 +109,11 @@ class MetricDef:
     # not worth the clutter. Set True for the rare case that's genuinely
     # worth showing despite not (yet) having a defensible scoring formula.
     show_unscored: bool = False
+    # Plain-English, 1-3 sentence explanation of this ONE row, shown only
+    # when the user clicks it open (see report._metric_rows). Distinct from
+    # `note`, which is either short score-cell filler (scorer="none") or
+    # scoring-anchor detail -- neither is meant for a casual reader.
+    desc: str = ""
 
 
 METRICS: list[MetricDef] = [
@@ -136,48 +139,66 @@ METRICS: list[MetricDef] = [
     MetricDef("pullaway_latency", "Lead pull-away latency", "Responsiveness", "s", eps=0.1),
     # (Speed Disagreement rows are duration-weighted global aggregates built
     #  in speed_disagreement_results, adherence-style, not METRICS entries)
-    # ---- Lateral / Turn Execution (per turn episode)
+    # ---- Lateral / Turns (per turn episode; unwind quality, turn-in
+    # commitment, and contested-execution divergence all live in one
+    # category -- see add_turn_samples)
     MetricDef(
-        "s_overshoot", "S-curve overshoot after unwind (sharp turns)", "Turn Execution", "% of peak",
+        "s_overshoot", "S-curve overshoot after unwind (sharp turns)", "Turns", "% of peak",
         eps=1.0, scorer="ratio_or_abs", abs_anchors=(5.0, 20.0, 40.0), abs_when_driver_below=5.0,
         note="absolute scale (100 at ≤5%, 50 at 20%, 0 at ≥40%) when your own overshoot is ~0",
+        desc="After a sharp turn straightens out, how far the wheel swings past center the other "
+        "way before settling, as a % of how far it turned into the turn. Higher means more overcorrection.",
     ),
     MetricDef(
-        "recovery_wobbles", "Recovery wobbles, >10° re-crossings (sharp turns)", "Turn Execution", "/turn",
+        "recovery_wobbles", "Recovery wobbles, >10° re-crossings (sharp turns)", "Turns", "/turn",
         eps=0.1, scorer="ratio_or_abs", abs_anchors=(0.0, 1.0, 2.0), abs_when_driver_below=0.5,
         note="absolute scale (100 at 0, 50 at 1, 0 at ≥2 per turn) when your baseline is ~0",
+        desc="How many extra back-and-forth swings past 10° happen while settling out of a sharp "
+        "turn, on top of the main overshoot. Higher means a twitchier finish.",
     ),
-    MetricDef("unwind_rate", "Unwind rate after peak (sharp turns)", "Turn Execution", "deg/s", better="match", eps=1.0),
     MetricDef(
-        "rescue_rate", "Driver-rescue rate in unwind", "Turn Execution", "%",
+        "unwind_rate", "Unwind rate after peak (sharp turns)", "Turns", "deg/s", better="match", eps=1.0,
+        desc="How fast the wheel comes back toward straight after a sharp turn's peak angle, in "
+        "degrees per second. Graded against your own unwind speed in either direction — too fast or "
+        "too slow both count against it.",
+    ),
+    MetricDef(
+        "rescue_rate", "Driver-rescue rate in unwind", "Turns", "%",
         agg="mean", scorer="abs", abs_anchors=(0.0, 25.0, 50.0), needs_driver=False,
         note="absolute scale: 100 at 0%, 50 at 25%, 0 at ≥50% of model-executed turns",
+        desc="Of the sharp turns the model was executing, the % where you had to grab the wheel "
+        "(or it disengaged) before it finished straightening out on its own.",
     ),
-    MetricDef("curve_s_overshoot", "Overshoot, curve episodes 20–90°", "Turn Execution", "% of peak",
+    MetricDef("curve_s_overshoot", "Overshoot, curve episodes 20–90°", "Turns", "% of peak",
               scorer="none", needs_driver=False, note="reported separately, not scored"),
-    MetricDef("curve_recovery_wobbles", "Wobbles, curve episodes 20–90°", "Turn Execution", "/turn",
+    MetricDef("curve_recovery_wobbles", "Wobbles, curve episodes 20–90°", "Turns", "/turn",
               scorer="none", needs_driver=False, note="reported separately, not scored"),
-    MetricDef("curve_unwind_rate", "Unwind rate, curve episodes 20–90°", "Turn Execution", "deg/s",
+    MetricDef("curve_unwind_rate", "Unwind rate, curve episodes 20–90°", "Turns", "deg/s",
               scorer="none", needs_driver=False, note="reported separately, not scored"),
-    MetricDef("cmd_unwind_lead_left", "Cmd-vs-actual unwind lead (left)", "Turn Execution", "s",
+    MetricDef("cmd_unwind_lead_left", "Cmd-vs-actual unwind lead (left)", "Turns", "s",
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
-    MetricDef("cmd_unwind_lead_right", "Cmd-vs-actual unwind lead (right)", "Turn Execution", "s",
+    MetricDef("cmd_unwind_lead_right", "Cmd-vs-actual unwind lead (right)", "Turns", "s",
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
     MetricDef(
-        "turn_effort_left", "Peak turn-in effort before any override (left)", "Turn Execution", "%",
+        "turn_effort_left", "Peak turn-in effort before any override (left)", "Turns", "%",
         scorer="none", needs_driver=False, show_unscored=True,
         note="context only, not scored -- see help text below",
+        desc="The highest % of available steering torque the model reached from the start of the "
+        "turn up to the moment you first touched the wheel (or across the whole turn if you never "
+        "did) — a rough read on whether it's actually committing. A low number isn't necessarily "
+        "wrong, since some turns just don't need much torque.",
     ),
     MetricDef(
-        "turn_effort_right", "Peak turn-in effort before any override (right)", "Turn Execution", "%",
+        "turn_effort_right", "Peak turn-in effort before any override (right)", "Turns", "%",
         scorer="none", needs_driver=False, show_unscored=True,
         note="context only, not scored -- see help text below",
+        desc="The highest % of available steering torque the model reached from the start of the "
+        "turn up to the moment you first touched the wheel (or across the whole turn if you never "
+        "did) — a rough read on whether it's actually committing. A low number isn't necessarily "
+        "wrong, since some turns just don't need much torque.",
     ),
-    # ---- Lateral / Turn-In Timing (per engaged turn episode, sharp or
-    # curve-band, signaled or not -- blinker-free, sourced from the same
-    # TurnEpisodes Turn Execution uses; see add_turn_samples)
     MetricDef(
-        "resisted_divergence_left", "Cmd-vs-actual divergence while you resisted (left)", "Turn-In Timing", "deg",
+        "resisted_divergence_left", "Cmd-vs-actual divergence while you resisted (left)", "Turns", "deg",
         scorer="abs", abs_anchors=(15.0, 75.0, 300.0), needs_driver=False,
         note="absolute scale: 100 at <=15°, 50 at 75°, 0 at >=300° peak |actual - commanded| angle "
         "during a sustained (>=0.3s) window where you genuinely resisted the model's own steering "
@@ -186,27 +207,39 @@ METRICS: list[MetricDef] = [
         "both sides. Anchors set from the real-data divergence distribution across two Palisade "
         "routes (35 conflict episodes: median ~79°, p90 ~337°, max 823° on one genuine multi-second "
         "tug-of-war) -- see report footer",
+        desc="Only scores turns where you genuinely fought the model's steering. Model/You show the "
+        "angle each side actually held at the peak of the disagreement, so you can see directly "
+        "whether the model wanted a sharper or softer turn than you were willing to give it.",
     ),
     MetricDef(
-        "resisted_divergence_right", "Cmd-vs-actual divergence while you resisted (right)", "Turn-In Timing", "deg",
+        "resisted_divergence_right", "Cmd-vs-actual divergence while you resisted (right)", "Turns", "deg",
         scorer="abs", abs_anchors=(15.0, 75.0, 300.0), needs_driver=False,
         note="same metric and anchors as resisted_divergence_left, scoped to turns that went right",
+        desc="Only scores turns where you genuinely fought the model's steering. Model/You show the "
+        "angle each side actually held at the peak of the disagreement, so you can see directly "
+        "whether the model wanted a sharper or softer turn than you were willing to give it.",
     ),
     MetricDef(
-        "cmd_onset_lead_left", "Cmd-vs-actual onset timing (left)", "Turn-In Timing", "s",
+        "cmd_onset_lead_left", "Cmd-vs-actual onset timing (left)", "Turns", "s",
         agg="mean", scorer="abs", abs_anchors=(0.0, 0.5, 1.5), needs_driver=False,
         note="how much later (+) or sooner (-) the model's own commanded path called for the turn, "
         "vs. when the wheel actually turned in (that instant is the zero reference, shown as 'You: "
         "0.00'). Absolute scale: 100 at <=0s (model committed at/before the wheel moved), 50 at 0.5s "
         "late, 0 at >=1.5s late",
+        desc="How much later (+) or sooner (−) the model's own commanded path called for the turn, "
+        "vs. when the wheel actually turned in. 'You' is always 0.00 — that's the instant being "
+        "measured against.",
     ),
     MetricDef(
-        "cmd_onset_lead_right", "Cmd-vs-actual onset timing (right)", "Turn-In Timing", "s",
+        "cmd_onset_lead_right", "Cmd-vs-actual onset timing (right)", "Turns", "s",
         agg="mean", scorer="abs", abs_anchors=(0.0, 0.5, 1.5), needs_driver=False,
         note="how much later (+) or sooner (-) the model's own commanded path called for the turn, "
         "vs. when the wheel actually turned in (that instant is the zero reference, shown as 'You: "
         "0.00'). Absolute scale: 100 at <=0s (model committed at/before the wheel moved), 50 at 0.5s "
         "late, 0 at >=1.5s late",
+        desc="How much later (+) or sooner (−) the model's own commanded path called for the turn, "
+        "vs. when the wheel actually turned in. 'You' is always 0.00 — that's the instant being "
+        "measured against.",
     ),
     # ---- Lateral / General Smoothness (per span)
     MetricDef("rms_lat_jerk", "RMS lateral jerk", "General Smoothness", "m/s³", eps=0.02),
@@ -481,11 +514,11 @@ def collect_samples(
 def add_turn_samples(samples: dict, turns) -> None:
     """Fold turn episodes into the sample lists.
 
-    Turn Execution's behavior metrics (and the onset-timing lag,
-    cmd_onset_lead) skip engaged episodes where the driver interfered before
-    the peak (contaminated) or during the unwind (rescued): those aren't the
-    model's own unwind/onset, they're a human-forced one. Rescue itself is
-    the rescue_rate signal.
+    The unwind-phase behavior metrics (s_overshoot, recovery_wobbles,
+    unwind_rate -- and the onset-timing lag, cmd_onset_lead) skip engaged
+    episodes where the driver interfered before the peak (contaminated) or
+    during the unwind (rescued): those aren't the model's own unwind/onset,
+    they're a human-forced one. Rescue itself is the rescue_rate signal.
 
     resisted_divergence_{left,right} and turn_effort_{left,right} are the
     exceptions: neither is gated on contaminated/rescued. resisted_divergence
@@ -539,7 +572,7 @@ INITIATOR_BUCKETS = ("model", "driver", "lag", "unknown")
 
 
 def turn_in_breakdown(turns) -> dict[str, dict]:
-    """Unscored Turn-In Timing texture: every engaged episode by initiator
+    """Unscored Turns texture: every engaged episode by initiator
     (who moved first -- descriptive only, never gates scoring), with the
     conflict/divergence data resisted_divergence actually scores from, and
     torque-ceiling status as pure diagnostic context (was the model already
@@ -857,7 +890,7 @@ def grade(
         cats["Speed Disagreement"].extra.update(speed_disagreement_extra)
 
     if turn_in_extra:
-        cats["Turn-In Timing"].extra.update(turn_in_extra)
+        cats["Turns"].extra.update(turn_in_extra)
 
     for cat in cats.values():
         scored = [m.score for m in cat.metrics if m.score is not None]

@@ -11,7 +11,7 @@ inter-segment time gaps > 1 s), except blinker turn-intent windows, which are
 detected on the whole timeline (a disengagement inside the window is part of
 the signal) and discarded if they cross a gap.
 
-Turn-In Timing's scored metric is cmd-vs-actual DIVERGENCE during genuine
+One of Turns' scored metrics is cmd-vs-actual DIVERGENCE during genuine
 driver resistance, not torque-ceiling status: a continuously-replanning
 vision model rarely "refuses" a turn outright, so what actually matters is
 how far the realized path ended up from what the model wanted while the

@@ -100,8 +100,8 @@ def test_poolable_keys_derived_from_metrics_table():
     for k in ("rms_jerk", "median_gap", "s_overshoot",
               "recovery_wobbles", "unwind_rate", "stop_lurch"):
         assert k in keys
-    # turn_in_delay and missed_turn_in were both retired (Turn-In Timing is
-    # now blinker-free and scores resisted_divergence, sourced from
+    # turn_in_delay and missed_turn_in were both retired (Turns is
+    # blinker-free and scores resisted_divergence, sourced from
     # TurnEpisode's model-internal fields, all needs_driver=False and so
     # never poolable in the first place)
     assert "turn_in_delay" not in keys
