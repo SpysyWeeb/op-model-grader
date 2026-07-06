@@ -159,6 +159,13 @@ class TurnEpisode:
     divergence_deg: float | None = None
     conflict_duration_s: float | None = None  # duration of the window divergence_deg came from
     conflict_ceiling: bool | None = None  # diagnostic: was torque_output at the ceiling during it
+    # |actual| and |commanded| angle at the SAME instant divergence_deg was
+    # measured (the peak-disagreement moment within the window) -- so
+    # divergence_deg == abs(conflict_model_deg - conflict_you_deg) exactly,
+    # by construction. Lets the report show "you held ~Xdeg, model wanted
+    # ~Ydeg" instead of a single hard-to-interpret difference number.
+    conflict_you_deg: float | None = None
+    conflict_model_deg: float | None = None
 
 
 def _band(peak_abs: float) -> str:
@@ -342,20 +349,24 @@ def detect_turn_episodes(
                     opposing = (np.sign(act) != np.sign(cmd)) & (act != 0) & (cmd != 0)
                 conflict_mask = pressed & opposing
 
-                best = None  # (divergence, duration, ra, rb) -- span-local indices
+                best = None  # (divergence, duration, ra, rb, peak_idx) -- span-local indices
                 for ca, cb in _contiguous_runs(conflict_mask[a:b]):
                     ra, rb = a + ca, a + cb
                     dur = float(t[rb - 1] - t[ra]) if rb > ra else 0.0
                     if dur < CONFLICT_MIN_S:
                         continue
-                    div = float(np.max(np.abs(act[ra:rb] - cmd[ra:rb])))
+                    local_diff = np.abs(act[ra:rb] - cmd[ra:rb])
+                    peak_idx = ra + int(np.argmax(local_diff))
+                    div = float(local_diff[peak_idx - ra])
                     if best is None or div > best[0]:
-                        best = (div, dur, ra, rb)
+                        best = (div, dur, ra, rb, peak_idx)
 
                 if best is not None:
-                    div, dur, ra, rb = best
+                    div, dur, ra, rb, peak_idx = best
                     ep.divergence_deg = div
                     ep.conflict_duration_s = dur
+                    ep.conflict_you_deg = float(abs(act[peak_idx]))
+                    ep.conflict_model_deg = float(abs(cmd[peak_idx]))
                     if torque is not None:
                         win_t = t[ra:rb]
                         ceil_mask = np.abs(torque[ra:rb]) >= CEILING_FRAC

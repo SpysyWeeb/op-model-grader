@@ -179,15 +179,17 @@ METRICS: list[MetricDef] = [
     ),
     MetricDef(
         "cmd_onset_lead_left", "Cmd-vs-actual onset lead (left)", "Turn-In Timing", "s",
-        scorer="abs", abs_anchors=(0.0, 0.5, 1.5), needs_driver=False,
-        note="absolute scale: 100 at <=0s (model commands at/before the wheel moves), "
-        "50 at 0.5s late, 0 at >=1.5s late",
+        agg="mean", scorer="none", needs_driver=False,
+        note="diagnostic, not scored -- for a torque-controlled car under normal control this is "
+        "almost always ~0s (the wheel tracks the commanded curve near-instantly), so it added little "
+        "signal and mostly just padded the category score upward",
     ),
     MetricDef(
         "cmd_onset_lead_right", "Cmd-vs-actual onset lead (right)", "Turn-In Timing", "s",
-        scorer="abs", abs_anchors=(0.0, 0.5, 1.5), needs_driver=False,
-        note="absolute scale: 100 at <=0s (model commands at/before the wheel moves), "
-        "50 at 0.5s late, 0 at >=1.5s late",
+        agg="mean", scorer="none", needs_driver=False,
+        note="diagnostic, not scored -- for a torque-controlled car under normal control this is "
+        "almost always ~0s (the wheel tracks the commanded curve near-instantly), so it added little "
+        "signal and mostly just padded the category score upward",
     ),
     # ---- Lateral / General Smoothness (per span)
     MetricDef("rms_lat_jerk", "RMS lateral jerk", "General Smoothness", "m/s³", eps=0.02),
@@ -542,6 +544,32 @@ def turn_in_breakdown(turns) -> dict[str, dict]:
         divs = bucket.pop("divergences")
         bucket["median_divergence"] = float(np.median(divs)) if divs else None
     return buckets
+
+
+def resisted_angle_context(turns) -> dict[str, dict]:
+    """Per-side (left/right) median |actual| and |commanded| angle at the
+    peak-disagreement moment, across the SAME episodes resisted_divergence_
+    {side} scores from -- turns a single hard-to-interpret divergence number
+    into "you held ~Xdeg, the model wanted ~Ydeg", which is what the
+    divergence score is actually built from. Report-display use only (see
+    report.py's row_overrides); never affects scoring."""
+    out: dict[str, dict] = {}
+    for side in ("left", "right"):
+        you_vals = [
+            ep.conflict_you_deg for ep in turns
+            if ep.engaged and ep.side == side and ep.conflict_you_deg is not None
+        ]
+        model_vals = [
+            ep.conflict_model_deg for ep in turns
+            if ep.engaged and ep.side == side and ep.conflict_model_deg is not None
+        ]
+        if you_vals and model_vals:
+            out[side] = {
+                "you_deg": float(np.median(you_vals)),
+                "model_deg": float(np.median(model_vals)),
+                "n": len(you_vals),
+            }
+    return out
 
 
 # ------------------------------------------------------------------ grading

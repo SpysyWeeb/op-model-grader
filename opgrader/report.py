@@ -279,33 +279,39 @@ def _driver_cell(m: MetricResult) -> str:
     return val + extra
 
 
-def _metric_rows(metrics: list[MetricResult]) -> str:
+def _metric_rows(metrics: list[MetricResult], row_overrides: dict | None = None) -> str:
+    """row_overrides: {metric_key: {"model_deg": float, "you_deg": float, "n": int}}
+    -- lets a specific category (Turn-In Timing's resisted-divergence rows)
+    show a more interpretable pair of numbers than the generic Model/You
+    aggregate, without teaching this shared renderer about any one metric."""
+    row_overrides = row_overrides or {}
     rows = []
     for m in metrics:
         d = m.definition
-        you = _driver_cell(m)
         if d.scorer == "none":
-            note = d.note or "diagnostic"
-            if m.n_model == 0 and m.n_driver == 0:
-                note = "no data"
-            rows.append(
-                f'<tr class="insuff"><td>{_esc(d.label)}</td>'
-                f"<td>{_fmt(m.model_agg)}</td><td>{you}</td>"
-                f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
-            )
-        elif m.score is None:
+            continue  # diagnostic-only; not worth a row (see cmd_unwind_lead_*, cmd_onset_lead_*)
+        ov = row_overrides.get(d.key)
+        if ov:
+            model_txt = _fmt(ov.get("model_deg"))
+            you_txt = _fmt(ov.get("you_deg"))
+            if ov.get("n"):
+                you_txt += f' <span class="muted">(n={ov["n"]})</span>'
+        else:
+            model_txt = _fmt(m.model_agg)
+            you_txt = _driver_cell(m)
+        if m.score is None:
             need_d = " each" if d.needs_driver else ""
             note = f"insufficient data (model n={m.n_model}, you n={m.n_driver}, need ≥3{need_d})"
             rows.append(
                 f'<tr class="insuff"><td>{_esc(d.label)}</td>'
-                f"<td>{_fmt(m.model_agg)}</td><td>{you}</td>"
+                f"<td>{model_txt}</td><td>{you_txt}</td>"
                 f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
             )
         else:
             star = "*" if (d.scorer == "abs" or (d.scorer == "ratio_or_abs" and (m.n_driver < 3 or (m.driver_agg or 0) < (d.abs_when_driver_below or 0)))) else ""
             rows.append(
                 f"<tr><td>{_esc(d.label)}{star}</td>"
-                f"<td>{_fmt(m.model_agg)}</td><td>{you}</td>"
+                f"<td>{model_txt}</td><td>{you_txt}</td>"
                 f"<td>{_esc(d.unit)}</td><td>{m.score:.0f}</td></tr>"
             )
     return "".join(rows)
@@ -684,23 +690,22 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
     ),
     "Turn-In Timing": (
         "Blinker-free: every engaged turn is checked directly, sharp or gentler, "
-        "signaled or not, the same turn episodes Turn Execution uses. Cmd-vs-actual "
-        "divergence measures how far the model's own commanded angle ended up from "
-        "the actual angle while you were genuinely fighting it (your torque pushing "
-        "the opposite way from the model's, sustained at least 0.3 s — not just a "
-        "hand resting on the wheel) — a continuously-replanning model rarely "
-        "'refuses' a turn outright, so what matters is how far reality drifted from "
-        "its plan during a real tug-of-war, not whether it technically commanded "
-        "some path. Turns with no such resistance score nothing (not a zero) — "
-        "there was no disagreement to measure. Cmd-vs-actual onset lead separately "
-        "compares when the model's own commanded path first called for the turn "
-        "against when the wheel actually got there — positive means the model "
-        "committed after the fact. The breakdown table below shows who moved first "
-        "(model/driver/lag) and whether the model was already at its torque limit "
-        "during the resistance — shown for context only, it never changes the "
-        "score (a different, blinker-based 'Blinker turn intents' table elsewhere "
-        "in this report only covers turns you signaled below 20 mph — that's a "
-        "separate, unscored diagnostic, not this grade).",
+        "signaled or not, the same turn episodes Turn Execution uses. This grade only "
+        "fires when you were genuinely fighting the model's steering — your torque "
+        "pushing the opposite way from the model's own commanded torque, sustained at "
+        "least 0.3 s, not just a hand resting on the wheel. In plain terms: you're both "
+        "taking the same turn, but the model wants to take it harder (or softer) than "
+        "you're willing to, so you took over and held a different angle — the Model/You "
+        "columns show the typical angle each side actually held (in degrees) at the "
+        "moment the disagreement peaked, so you can see directly whether the model "
+        "wanted MORE turn than you gave it or less; the Score column grades how big "
+        "that gap typically is. A continuously-replanning model rarely 'refuses' a turn "
+        "outright, so this is about how far reality drifted from its plan during a real "
+        "tug-of-war, not whether it technically commanded some path. Turns with no such "
+        "resistance score nothing (not a zero) — there was no disagreement to measure. "
+        "(A different, blinker-based 'Blinker turn intents' table elsewhere in this "
+        "report only covers turns you signaled below 20 mph — that's a separate, "
+        "unscored diagnostic, not this grade.)",
         "Any turn counts, manual or model-driven, sharp or gentle, signaled or not "
         "— more of them sharpens this grade. This one specifically wants moments "
         "you actually resisted the model's steering (not just touched the wheel) "
@@ -811,10 +816,17 @@ def _category_card(cat: CategoryResult) -> str:
     if cat.name == "Ping-Pong":
         body = _pingpong_card(cat)
     else:
+        row_overrides = None
+        if cat.name == "Turn-In Timing":
+            angles = cat.extra.get("resisted_angles") if cat.extra else None
+            if angles:
+                row_overrides = {
+                    f"resisted_divergence_{side}": vals for side, vals in angles.items()
+                }
         body = f"""
   <table class="mtable">
     <thead><tr><th>Metric</th><th>Model</th><th>You</th><th>Unit</th><th>Score</th></tr></thead>
-    <tbody>{_metric_rows(cat.metrics)}</tbody>
+    <tbody>{_metric_rows(cat.metrics, row_overrides)}</tbody>
   </table>"""
         tf = cat.extra.get("t_follow_targets") if cat.extra else None
         if tf:
@@ -1132,13 +1144,20 @@ def render_report(analysis, out_path: str | Path) -> Path:
   VehicleModel(carParams).get_steer_from_curvature(−actuators.curvature, vEgo). Ping-pong = high-passed
   steering angle (minus centered 2 s mean), per speed bin, standstill and steeringPressed excluded.
   <strong>Turn-In Timing is blinker-free</strong>: it scores the same turn episodes as Turn Execution,
-  every engaged turn regardless of band — cmd-onset lead = the model's own commanded-angle 20° crossing
-  minus the actual angle's. <strong>Resisted cmd-vs-actual divergence</strong> replaces a torque-ceiling
+  every engaged turn regardless of band. Cmd-onset lead (the model's own commanded-angle 20° crossing
+  minus the actual angle's) is computed but no longer scored or shown — for a torque-controlled car under
+  normal control it's almost always ≈0s, so it added little signal and mostly padded the category score
+  upward; the Model/You columns on the divergence rows below carry the real story instead.
+  <strong>Resisted cmd-vs-actual divergence</strong> replaces a torque-ceiling
   gate: a conflict window opens where steeringPressed is true AND your steering torque opposes the
   model's own commanded torque (torqueState.output; falls back to opposing actual-vs-commanded angle
   signs when either torque channel is unavailable), sustained ≥ 0.3 s to filter out an incidental hand on
   the wheel. The metric is the peak |actual − commanded| angle during that window; episodes with no such
-  window score nothing at all, not a zero. Scored on absolute anchors 15°/75°/300° → 100/50/0, set from
+  window score nothing at all, not a zero. The Model/You columns show the median |commanded| and
+  |actual| angle at that same peak-disagreement instant, per side, across all qualifying episodes — two
+  independently-aggregated numbers (medians), so they won't exactly arithmetically match the median score
+  above them, but together they tell you whether the model typically wanted a sharper or softer turn than
+  you were willing to give it. Scored on absolute anchors 15°/75°/300° → 100/50/0, set from
   the real divergence distribution across two Palisade routes (35 conflict episodes out of 46 engaged
   turns: median ≈ 79°, p90 ≈ 337°, max 823° on one genuine multi-second tug-of-war) so the scale
   distinguishes a little push-back from a full fight rather than being picked in a vacuum. Whether the

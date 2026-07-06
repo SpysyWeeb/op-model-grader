@@ -8,6 +8,7 @@ from opgrader.grading import (
     add_turn_samples,
     grade,
     letter,
+    resisted_angle_context,
     score_absolute,
     score_ratio,
     turn_in_breakdown,
@@ -22,6 +23,7 @@ def empty_samples():
 def _ep(engaged=True, sharp=True, contaminated=False, rescued=False,
         never_commanded=False, cmd_onset_lead=None, cmd_unwind_lead=None,
         initiator="unknown", divergence_deg=None, conflict_ceiling=None,
+        conflict_you_deg=None, conflict_model_deg=None,
         side="left", i=(0, 1)):
     """Minimal TurnEpisode for add_turn_samples/turn_in_breakdown wiring tests."""
     return TurnEpisode(
@@ -32,6 +34,7 @@ def _ep(engaged=True, sharp=True, contaminated=False, rescued=False,
         never_commanded=never_commanded, cmd_onset_lead=cmd_onset_lead,
         cmd_unwind_lead=cmd_unwind_lead, initiator=initiator,
         divergence_deg=divergence_deg, conflict_ceiling=conflict_ceiling,
+        conflict_you_deg=conflict_you_deg, conflict_model_deg=conflict_model_deg,
     )
 
 
@@ -182,13 +185,16 @@ def test_turn_in_delay_retired():
     assert not any(m.key == "turn_in_delay" for m in METRICS)
 
 
-def test_cmd_onset_lead_scored_metric_defs():
+def test_cmd_onset_lead_is_diagnostic_not_scored():
+    """Demoted: for a torque-controlled car this is almost always ~0s (the
+    wheel tracks the commanded curve near-instantly), so it added little
+    signal and mostly just padded the Turn-In Timing score upward -- kept
+    as a computed-but-unscored diagnostic, same treatment as cmd_unwind_lead."""
     for key in ("cmd_onset_lead_left", "cmd_onset_lead_right"):
         d = METRIC_BY_KEY[key]
         assert d.category == "Turn-In Timing"
-        assert d.scorer == "abs"
+        assert d.scorer == "none"
         assert d.needs_driver is False
-        assert d.abs_anchors == (0.0, 0.5, 1.5)
 
 
 def test_resisted_divergence_only_from_conflict_episodes():
@@ -263,6 +269,33 @@ def test_turn_in_breakdown_buckets_by_initiator_and_ceiling():
     assert bd["unknown"]["n"] == 0  # the manual episode never entered any bucket
 
 
+def test_resisted_angle_context_per_side_medians():
+    """Turns a single divergence number into 'you held ~X, model wanted ~Y' --
+    medians computed independently per side, only from qualifying (conflict)
+    episodes; a side with none present isn't included in the result."""
+    turns = [
+        _ep(engaged=True, side="left", divergence_deg=40.0,
+            conflict_you_deg=45.0, conflict_model_deg=85.0),
+        _ep(engaged=True, side="left", divergence_deg=20.0,
+            conflict_you_deg=55.0, conflict_model_deg=75.0),
+        _ep(engaged=True, side="left", divergence_deg=None),  # no conflict: excluded
+        _ep(engaged=False, side="left", divergence_deg=100.0,
+            conflict_you_deg=10.0, conflict_model_deg=110.0),  # manual: excluded
+        _ep(engaged=True, side="right", divergence_deg=10.0,
+            conflict_you_deg=30.0, conflict_model_deg=40.0),
+    ]
+    ctx = resisted_angle_context(turns)
+    assert ctx["left"]["you_deg"] == pytest.approx(50.0)  # median(45, 55)
+    assert ctx["left"]["model_deg"] == pytest.approx(80.0)  # median(85, 75)
+    assert ctx["left"]["n"] == 2
+    assert ctx["right"] == {"you_deg": pytest.approx(30.0), "model_deg": pytest.approx(40.0), "n": 1}
+
+
+def test_resisted_angle_context_empty_side_omitted():
+    turns = [_ep(engaged=True, side="left", divergence_deg=None)]  # no qualifying conflicts anywhere
+    assert resisted_angle_context(turns) == {}
+
+
 def test_cmd_onset_lead_excluded_when_contaminated_or_rescued():
     """cmd_onset_lead mirrors cmd_unwind_lead's existing exclusion: a
     contaminated/rescued episode's cmd-vs-act timing comparison is noisy
@@ -277,13 +310,15 @@ def test_cmd_onset_lead_excluded_when_contaminated_or_rescued():
     assert samples["cmd_onset_lead_left"]["model"] == [0.4]
 
 
-def test_cmd_onset_lead_anchor_scores():
+def test_cmd_onset_lead_never_scores():
     samples = empty_samples()
-    samples["cmd_onset_lead_left"]["model"] = [-0.3, -0.3, -0.3]  # negative -> clipped to 100
-    samples["cmd_onset_lead_right"]["model"] = [0.25, 0.25, 0.25]  # halfway to the 50-point anchor
+    samples["cmd_onset_lead_left"]["model"] = [-0.3, -0.3, -0.3]
+    samples["cmd_onset_lead_right"]["model"] = [0.25, 0.25, 0.25]
     rep = grade(samples)
     res = {m.definition.key: m for c in rep.categories for m in c.metrics}
-    assert res["cmd_onset_lead_left"].score == pytest.approx(100.0)
-    assert res["cmd_onset_lead_right"].score == pytest.approx(75.0)
+    assert res["cmd_onset_lead_left"].score is None
+    assert res["cmd_onset_lead_right"].score is None
+    # still aggregated for display even though it's not scored
+    assert res["cmd_onset_lead_left"].model_agg == pytest.approx(-0.3)
 
 

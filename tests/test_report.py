@@ -1,5 +1,5 @@
-from opgrader.grading import S_CUTOFF, letter
-from opgrader.report import _grade_class, _lettered_score
+from opgrader.grading import METRIC_BY_KEY, S_CUTOFF, MetricResult, letter
+from opgrader.report import _grade_class, _lettered_score, _metric_rows
 
 
 def test_grade_class_gold_for_perfect_score():
@@ -23,3 +23,33 @@ def test_lettered_score_never_shows_100_unless_truly_s_tier():
         assert letter(perfect) == "S"
         assert _lettered_score(perfect) == "100"
     assert _lettered_score(87.4) == "87"  # ordinary case unaffected
+
+
+def test_metric_rows_hides_unscored_diagnostics():
+    """scorer='none' rows (cmd_unwind_lead_*, curve_*, cmd_onset_lead_*) are
+    computed but not worth a table row -- they'd otherwise clutter the card
+    with 'diagnostic, not scored' filler."""
+    d = METRIC_BY_KEY["cmd_unwind_lead_left"]
+    assert d.scorer == "none"
+    m = MetricResult(definition=d, model_vals=[0.4, 0.5, 0.6], driver_vals=[])
+    m.model_agg = 0.5
+    assert _metric_rows([m]) == ""
+
+
+def test_metric_rows_row_override_replaces_model_you_cells():
+    d = METRIC_BY_KEY["resisted_divergence_left"]
+    m = MetricResult(definition=d, model_vals=[70.0, 80.0, 90.0], driver_vals=[])
+    m.model_agg = 80.0
+    m.score = 51.0
+    html = _metric_rows([m], {"resisted_divergence_left": {"model_deg": 82.3, "you_deg": 45.1, "n": 12}})
+    assert "82.30" in html and "45.10" in html and "(n=12)" in html
+    assert "80.00" not in html  # the raw model_agg must not leak through when overridden
+
+
+def test_metric_rows_no_override_uses_normal_rendering():
+    d = METRIC_BY_KEY["resisted_divergence_left"]
+    m = MetricResult(definition=d, model_vals=[70.0, 80.0, 90.0], driver_vals=[])
+    m.model_agg = 80.0
+    m.score = 51.0
+    html = _metric_rows([m])
+    assert "80.00" in html

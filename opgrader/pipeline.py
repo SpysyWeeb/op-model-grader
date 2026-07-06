@@ -14,6 +14,7 @@ from .grading import (
     add_turn_samples,
     collect_samples,
     grade,
+    resisted_angle_context,
     score_ratio,
     turn_in_breakdown,
 )
@@ -342,6 +343,9 @@ def analyze(
         t_follow_targets=an.t_follow_targets,
         speed_disagreement_extra={"result": an.speed_disagreement} if an.speed_disagreement else None,
         profile_info=profile_info,
-        turn_in_extra={"breakdown": turn_in_breakdown(an.turns)},
+        turn_in_extra={
+            "breakdown": turn_in_breakdown(an.turns),
+            "resisted_angles": resisted_angle_context(an.turns),
+        },
     )
     return an
