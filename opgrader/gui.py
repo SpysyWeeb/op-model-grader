@@ -150,6 +150,7 @@ class App:
         self.tree.tag_configure("ready", foreground="#0ca30c")
         self.tree.tag_configure("partial", foreground="#b8860b")
         self.tree.tag_configure("none", foreground="gray")
+        self.tree.tag_configure("downloaded", foreground="#2a78d6")
 
         act = ttk.Frame(self.root)
         act.pack(fill="x", **pad)
@@ -373,7 +374,15 @@ class App:
                 (C.summarize_route(r) for r in raw or []),
                 key=lambda r: -(r["start_utc_millis"] or 0),
             )
+            # Cheap local-disk check (no network) -- a route already fully
+            # downloaded from a past grading run doesn't need to wait on the
+            # server-side badge fetch below, and its "downloaded" status must
+            # not get overwritten once that fetch completes (see _fetch_badges).
             self.badges = {}
+            for r in self.routes:
+                lb = C.local_badge(r["fullname"], r["n_segments"])
+                if lb:
+                    self.badges[r["fullname"]] = lb
             self._render_routes()
             self.routes_msg.config(text=f"{len(self.routes)} drives")
             self._fetch_badges()
@@ -410,6 +419,8 @@ class App:
 
         def fetch():
             for r in routes:
+                if self.badges.get(r["fullname"], {}).get("kind") == "downloaded":
+                    continue  # already known local -- don't overwrite, don't bother asking the server
                 try:
                     files = C.get_route_files(r["fullname"], self.jwt)
                     badge = C.files_badge(files, r["n_segments"])
@@ -422,6 +433,8 @@ class App:
         threading.Thread(target=fetch, daemon=True).start()
 
     def _set_badge(self, fullname: str, badge: dict):
+        if self.badges.get(fullname, {}).get("kind") == "downloaded":
+            return  # already known local -- a server-side badge never overrides this
         self.badges[fullname] = badge
         if badge["kind"] == "ready":
             self.pending_uploads.discard(fullname)

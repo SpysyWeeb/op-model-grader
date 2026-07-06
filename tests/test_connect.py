@@ -7,13 +7,14 @@ import json
 
 import pytest
 
-from opgrader import connect
+from opgrader import connect, download
 from opgrader.connect import (
     ApiError,
     JobManager,
     build_athena_payload,
     build_upload_paths,
     files_badge,
+    local_badge,
     request_upload,
     summarize_route,
 )
@@ -138,6 +139,30 @@ def test_summarize_route_and_badge():
     assert b["kind"] == "none" and "qlog" in b["label"]
     b = files_badge({}, 0)
     assert b["kind"] == "none"
+
+
+def test_local_badge_only_when_fully_present(tmp_path, monkeypatch):
+    # cache_dir_for_route() reads download.CACHE_DIR at call time -- patching
+    # connect.CACHE_DIR wouldn't affect it, since that name is bound (and
+    # looked up) in download's own module namespace.
+    monkeypatch.setattr(download, "CACHE_DIR", tmp_path)
+    fullname = "dongle|0000001c--3d3b422b76"
+
+    assert local_badge(fullname, 3) is None  # cache dir doesn't exist yet
+
+    d = download.cache_dir_for_route(fullname)
+    d.mkdir(parents=True)
+    (d / "rlog_000.zst").write_bytes(b"x")
+    (d / "rlog_001.bz2").write_bytes(b"x")  # mixed extensions are fine
+    assert local_badge(fullname, 3) is None  # only 2 of 3 present
+
+    (d / "rlog_002.zst").write_bytes(b"x")
+    b = local_badge(fullname, 3)
+    assert b is not None and b["kind"] == "downloaded" and "downloaded" in b["label"]
+
+    # a zero-byte file (e.g. an interrupted download) doesn't count as present
+    (d / "rlog_002.zst").write_bytes(b"")
+    assert local_badge(fullname, 3) is None
 
 
 # ------------------------------------------------------------- job machinery

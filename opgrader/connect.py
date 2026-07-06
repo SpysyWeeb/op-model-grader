@@ -150,6 +150,27 @@ def files_badge(files: dict, n_segments: int) -> dict:
     return {"label": label, "kind": kind, "n_logs": n_logs, "n_segments": total}
 
 
+def local_badge(fullname: str, n_segments: int) -> dict | None:
+    """Badge for a route whose rlogs are ALREADY fully present in the local
+    download cache (e.g. a previous grading run) -- None if not, so the
+    caller falls back to the normal server-side files_badge. Same filename
+    convention download.py/run_grade_job use when saving segments."""
+    if not n_segments:
+        return None
+    d = cache_dir_for_route(fullname)
+    if not d.is_dir():
+        return None
+    have = sum(
+        1
+        for i in range(n_segments)
+        if any((p := d / f"rlog_{i:03d}{ext}").exists() and p.stat().st_size > 0
+               for ext in (".zst", ".bz2"))
+    )
+    if have < n_segments:
+        return None
+    return {"label": "rlogs downloaded", "kind": "downloaded", "n_logs": have, "n_segments": n_segments}
+
+
 # ------------------------------------------------------------ upload request
 
 
