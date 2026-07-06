@@ -125,25 +125,86 @@ class MetricDef:
 
 METRICS: list[MetricDef] = [
     # ---- Longitudinal / Smoothness (per span)
-    MetricDef("rms_jerk", "RMS jerk", "Smoothness", "m/s³", eps=0.02),
-    MetricDef("p95_jerk", "P95 |jerk|", "Smoothness", "m/s³", eps=0.05),
-    MetricDef("accel_reversals", "Accel reversals", "Smoothness", "/min", eps=0.2),
-    MetricDef("pct_hard_accel", "Time |accel| > 2", "Smoothness", "%", eps=0.1),
+    MetricDef(
+        "rms_jerk", "RMS jerk", "Smoothness", "m/s³", eps=0.02,
+        desc="How fast acceleration typically changes — the head-toss feeling passengers get. "
+        "Higher means jerkier driving overall.",
+    ),
+    MetricDef(
+        "p95_jerk", "P95 |jerk|", "Smoothness", "m/s³", eps=0.05,
+        desc="How bad the worst 5% of acceleration-change moments get, rather than the typical case "
+        "RMS jerk shows — catches occasional harsh moments that an average would hide.",
+    ),
+    MetricDef(
+        "accel_reversals", "Accel reversals", "Smoothness", "/min", eps=0.2,
+        desc="How many times per minute the car flips between throttle↔brake. Higher means more "
+        "speed-hunting, less settled cruising.",
+    ),
+    MetricDef(
+        "pct_hard_accel", "Time |accel| > 2", "Smoothness", "%", eps=0.1,
+        desc="The share of time spent accelerating or braking harder than 2 m/s² — genuinely hard, "
+        "not routine driving.",
+    ),
     # ---- Longitudinal / Following (per follow window)
-    MetricDef("median_gap", "Median time gap", "Following", "s", better="match", eps=0.2),
-    MetricDef("gap_hunting", "Gap hunting (detrended std)", "Following", "s", eps=0.05),
-    MetricDef("follow_reversals", "Accel reversals while following", "Following", "/min", eps=0.2),
+    MetricDef(
+        "median_gap", "Median time gap", "Following", "s", better="match", eps=0.2,
+        desc="Typical following distance behind the lead car, in seconds. Graded either direction — "
+        "too close or too far back both count against it.",
+    ),
+    MetricDef(
+        "gap_hunting", "Gap hunting (detrended std)", "Following", "s", eps=0.05,
+        desc="How much the following gap oscillates once the overall trend is removed — creeping "
+        "up then falling back repeatedly, rather than holding a steady distance.",
+    ),
+    MetricDef(
+        "follow_reversals", "Accel reversals while following", "Following", "/min", eps=0.2,
+        desc="How many times per minute the car flips between accelerating and braking specifically "
+        "while following a lead car.",
+    ),
     # ---- Longitudinal / Stopping (per stop approach)
-    MetricDef("peak_decel", "Peak decel", "Stopping", "m/s²", better="match", eps=0.1),
-    MetricDef("peak_decel_frac", "Peak-decel timing (fraction of approach)", "Stopping", "", better="match", eps=0.05),
-    MetricDef("stop_lurch", "Stop lurch (max |jerk|, last 2 s)", "Stopping", "m/s³", eps=0.05),
-    MetricDef("accel_at_crawl", "|Accel| at 0.2 m/s", "Stopping", "m/s²", eps=0.05),
+    MetricDef(
+        "peak_decel", "Peak decel", "Stopping", "m/s²", better="match", eps=0.1,
+        desc="The hardest braking moment during a stop approach. Graded either direction — braking "
+        "too gently or too hard both count against it.",
+    ),
+    MetricDef(
+        "peak_decel_frac", "Peak-decel timing (fraction of approach)", "Stopping", "", better="match", eps=0.05,
+        desc="Where in the stop approach the hardest braking happens: earlier means front-loaded "
+        "braking, later means a last-second squeeze. Expressed as a fraction of the whole approach.",
+    ),
+    MetricDef(
+        "stop_lurch", "Stop lurch (max |jerk|, last 2 s)", "Stopping", "m/s³", eps=0.05,
+        desc="The jolt in the final 2 seconds before coming to a full stop — the classic head-nod "
+        "right at the end.",
+    ),
+    MetricDef(
+        "accel_at_crawl", "|Accel| at 0.2 m/s", "Stopping", "m/s²", eps=0.05,
+        desc="How hard the brakes are still biting at walking pace, right before the car actually "
+        "comes to rest.",
+    ),
     # ---- Longitudinal / Launch (per launch)
-    MetricDef("time_to_5", "Time to 5 m/s", "Launch", "s", better="match", eps=0.2),
-    MetricDef("launch_peak_jerk", "Peak |jerk| in launch", "Launch", "m/s³", eps=0.05),
+    MetricDef(
+        "time_to_5", "Time to 5 m/s", "Launch", "s", better="match", eps=0.2,
+        desc="How long it takes to reach 5 m/s (about 11 mph) from a complete stop. Graded either "
+        "direction — too slow feels sluggish, too fast feels abrupt.",
+    ),
+    MetricDef(
+        "launch_peak_jerk", "Peak |jerk| in launch", "Launch", "m/s³", eps=0.05,
+        desc="How abrupt the initial getaway from a stop feels — the peak rate of acceleration "
+        "change right as the car starts moving.",
+    ),
     # ---- Longitudinal / Responsiveness (per stimulus)
-    MetricDef("lead_decel_latency", "Lead-decel response latency", "Responsiveness", "s", eps=0.1),
-    MetricDef("pullaway_latency", "Lead pull-away latency", "Responsiveness", "s", eps=0.1),
+    MetricDef(
+        "lead_decel_latency", "Lead-decel response latency", "Responsiveness", "s", eps=0.1,
+        desc="Seconds between the radar seeing the lead car brake meaningfully and this car actually "
+        "backing off. Your own number is often measured slow because you react to cues radar can't "
+        "see yet (brake lights, a changing light) — a slow human number here doesn't mean you're slow.",
+    ),
+    MetricDef(
+        "pullaway_latency", "Lead pull-away latency", "Responsiveness", "s", eps=0.1,
+        desc="Seconds between the lead car starting to move and this car starting to move. Same "
+        "anticipation caveat as lead-decel latency applies.",
+    ),
     # (Speed Disagreement rows are duration-weighted global aggregates built
     #  in speed_disagreement_results, adherence-style, not METRICS entries)
     # ---- Lateral / Turns (per turn episode; unwind quality, turn-in
@@ -249,10 +310,25 @@ METRICS: list[MetricDef] = [
         "measured against.",
     ),
     # ---- Lateral / General Smoothness (per span)
-    MetricDef("rms_lat_jerk", "RMS lateral jerk", "General Smoothness", "m/s³", eps=0.02),
-    MetricDef("steer_rate_rms", "Steering rate RMS (>10 m/s)", "General Smoothness", "deg/s", eps=0.5),
-    MetricDef("steer_reversals", "Steering reversals (>10 m/s)", "General Smoothness", "/min", eps=0.5),
-    MetricDef("pct_high_lat", "Time |lat accel| > 3", "General Smoothness", "%", eps=0.1),
+    MetricDef(
+        "rms_lat_jerk", "RMS lateral jerk", "General Smoothness", "m/s³", eps=0.02,
+        desc="Side-to-side smoothness felt by passengers — how fast lateral acceleration changes "
+        "during ordinary driving at speed.",
+    ),
+    MetricDef(
+        "steer_rate_rms", "Steering rate RMS (>10 m/s)", "General Smoothness", "deg/s", eps=0.5,
+        desc="How fast the steering wheel is typically being moved, above about 22 mph. Higher means "
+        "more constant small corrections rather than a settled line.",
+    ),
+    MetricDef(
+        "steer_reversals", "Steering reversals (>10 m/s)", "General Smoothness", "/min", eps=0.5,
+        desc="How many times per minute the wheel saws back and forth, above about 22 mph.",
+    ),
+    MetricDef(
+        "pct_high_lat", "Time |lat accel| > 3", "General Smoothness", "%", eps=0.1,
+        desc="The share of time spent in genuinely hard cornering (lateral acceleration over 3 m/s²) "
+        "at speed.",
+    ),
 ]
 
 METRIC_BY_KEY = {m.key: m for m in METRICS}
@@ -695,11 +771,21 @@ def adherence_results(
             scorer="abs" if enough else "none",
             abs_anchors=ADHERENCE_ANCHORS,
             needs_driver=False,
+            # show_unscored: without it, an insufficient-data row here would
+            # be silently hidden entirely by _metric_rows' hide-unscored-rows
+            # rule instead of showing why (the note below already explains
+            # it) -- unlike the curve_*/cmd_unwind_lead_* diagnostics that
+            # rule was written for, this one's worth seeing even when it
+            # can't yet score.
+            show_unscored=True,
             note=(
                 f"holds {med:.2f} s vs {target:.2f} s target, {pct:.0f}% off "
                 f"({secs:.0f} s of steady follow)"
                 + ("" if enough else f" — need {ADHERENCE_MIN_SECONDS:.0f} s to score")
             ),
+            desc="How closely the model holds the ACTIVE personality's target following gap. The "
+            "You column shows that personality's target, not a human baseline — there's no 'your' "
+            "following distance to compare against here.",
         )
         r = MetricResult(d, [med], [])
         r.model_agg = med
@@ -719,6 +805,22 @@ SD_PCT_ANCHORS = (0.0, 10.0, 25.0)  # % of model-long time
 SD_MAG_ANCHORS = (0.2, 1.0, 2.0)  # m/s^2 of extra demanded accel
 
 
+_SD_DESC = {
+    "gas_override_rate": "How often you press the gas to override the model's speed while it's "
+    "controlling longitudinal, per 10 minutes of model-controlled driving. Every press is a clean "
+    "signal you wanted more speed than it was giving you.",
+    "gas_override_pct": "The share of model-controlled driving time you spend actively overriding "
+    "its speed with the gas pedal.",
+    "gas_override_magnitude": "How much more acceleration you demanded than the model's own plan "
+    "called for, averaged across your overrides. A bigger number means you're pushing noticeably "
+    "harder than it wanted to.",
+    "speed_taken_back": "How much speed the model sheds in the 10 seconds after you let go of the "
+    "gas — the model actively fighting back against the cruise speed you just set.",
+    "reoverride_pct": "The share of overrides where you had to press the gas again within 15 "
+    "seconds — a sign the model settled back to a speed you still didn't want.",
+}
+
+
 def _sd_row(
     key: str, label: str, unit: str, value: float | None,
     anchors: tuple[float, float, float] | None, enough: bool, note: str,
@@ -728,6 +830,14 @@ def _sd_row(
         key=key, label=label, category="Speed Disagreement", unit=unit,
         scorer="abs" if (enough and anchors is not None) else "none",
         abs_anchors=anchors, needs_driver=False, note=note,
+        # show_unscored: speed_taken_back/reoverride_pct have no anchors at
+        # all and are ALWAYS built with enough=False (context by design, see
+        # speed_disagreement_results) -- without this they'd be permanently
+        # invisible in the main card despite CATEGORY_HELP explicitly
+        # describing them, and the rate/pct/magnitude rows would vanish too
+        # whenever data is thin rather than showing why.
+        show_unscored=True,
+        desc=_SD_DESC.get(key, ""),
     )
     r = MetricResult(d, [float(value)] * n_vals if value is not None else [], [])
     r.model_agg = value

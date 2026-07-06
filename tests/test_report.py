@@ -1,4 +1,4 @@
-from opgrader.grading import CategoryResult, METRIC_BY_KEY, S_CUTOFF, MetricResult, letter
+from opgrader.grading import CategoryResult, METRIC_BY_KEY, S_CUTOFF, MetricDef, MetricResult, letter
 from opgrader.report import _category_card, _grade_class, _lettered_score, _metric_rows
 
 
@@ -114,8 +114,12 @@ def test_metric_rows_desc_renders_clickable_row_with_hidden_desc_row():
 
 
 def test_metric_rows_no_desc_renders_plain_row_no_click_affordance():
-    d = METRIC_BY_KEY["rms_jerk"]
-    assert d.desc == ""  # sanity: this metric has no description authored
+    """Every real, visible metric now carries a desc (report-wide rollout),
+    so this exercises the mechanism directly with a synthetic MetricDef
+    rather than pinning to whichever real metric happens to lack one --
+    that made the test fragile (rms_jerk had no desc, then later did)."""
+    d = MetricDef(key="synthetic_no_desc", label="Synthetic metric", category="Smoothness", unit="m/s³")
+    assert d.desc == ""
     m = MetricResult(definition=d, model_vals=[0.1, 0.2, 0.3], driver_vals=[0.1, 0.2, 0.3])
     m.model_agg, m.driver_agg, m.score = 0.2, 0.2, 100.0
     html = _metric_rows([m])

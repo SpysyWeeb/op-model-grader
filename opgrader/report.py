@@ -659,50 +659,37 @@ def _grade_class(score) -> str:
 # mean, and how to drive to collect good data for that grade.
 CATEGORY_HELP: dict[str, tuple[str, str]] = {
     "Smoothness": (
-        "Jerk is how fast acceleration changes — the head-toss feel. RMS jerk is the "
-        "typical level (higher = jerkier); P95 |jerk| is how bad the worst moments get; "
-        "accel reversals counts throttle↔brake flip-flops per minute (speed hunting); "
-        "time |accel| > 2 is the share of genuinely hard acceleration or braking.",
+        "Overall acceleration/braking smoothness throughout a drive. Click any row "
+        "below for what it specifically means.",
         "Any driving counts. For a fair grade, drive the same kinds of roads manually "
         "that you let the model drive — a model graded on city streets against your "
         "highway cruising will look worse than it is.",
     ),
     "Following": (
-        "Median time gap is the following distance in seconds behind the lead; gap "
-        "hunting is how much that gap oscillates once the overall trend is removed "
-        "(creep-up/fall-back cycles); follow-adherence rows compare the model's held "
-        "gap to what the active personality is tuned to hold.",
+        "How well the model holds a following gap behind a lead car. Click any row "
+        "below for what it specifically means.",
         "Best data: 30+ seconds of steady following behind one car above ~18 mph, "
         "without stop-and-go — both engaged and while you drive. Adherence needs the "
         "model actually controlling gas/brake behind a lead.",
     ),
     "Stopping": (
-        "Peak decel is the hardest braking moment of an approach; peak-decel timing is "
-        "where in the approach it happens (earlier = braking front-loaded, later = a "
-        "late hard squeeze); stop lurch is the jolt in the last 2 seconds — the classic "
-        "end-of-stop head-nod; |accel| at 0.2 m/s is how hard the brakes still bite at "
-        "walking pace.",
+        "How the car brakes down to a complete stop. Click any row below for what it "
+        "specifically means.",
         "Complete stops from ~18+ mph. Let the model finish stops without touching the "
         "pedals (a gas/brake tap removes that stop from its data), and make some full "
         "manual stops too — they are the baseline being compared against.",
     ),
     "Launch": (
-        "Time to 5 m/s is 0→11 mph from standstill; peak |jerk| in launch is how "
-        "abrupt the getaway is.",
+        "How the car gets moving from a standstill. Click any row below for what it "
+        "specifically means.",
         "Standstill-to-rolling starts with no gas pedal help for the model side, and "
         "normal manual launches for your baseline. Launches behind a lead also feed "
         "the pull-away latency metric.",
     ),
     "Responsiveness": (
-        "Reaction stopwatches. Lead-decel response latency: when the radar sees the "
-        "lead braking meaningfully, how many seconds until this car backs off. "
-        "Pull-away latency: lead starts moving → this car starts moving. NOTE: your "
-        "own latency is often measured long — you anticipate (brake lights up ahead, a "
-        "changing light) and have usually responded before the lead's deceleration is "
-        "even measurable, so the clock starts after you already acted. A fast model "
-        "number is genuinely good; a slow human number mostly means you react to "
-        "earlier cues than radar decel. Don't read model-beats-you here as you being "
-        "slow.",
+        "Reaction stopwatches for how quickly the car responds to what the lead car "
+        "does. Click either row below for what it specifically means — including an "
+        "important caveat about reading your own numbers here.",
         "Needs following situations where the lead visibly brakes or pulls away — "
         "ordinary traffic provides these; more time spent following = better data.",
     ),
@@ -727,24 +714,19 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "resisted-divergence rows need real resistance, not just a hand on the wheel.",
     ),
     "General Smoothness": (
-        "Overall steering comfort at speed: RMS lateral jerk is side-to-side "
-        "smoothness felt by passengers; steering rate RMS is how fast the wheel is "
-        "being moved above ~22 mph; steering reversals is wheel sawing per minute; "
-        "time |lat accel| > 3 is the share of hard cornering.",
+        "Overall steering comfort during ordinary driving at speed. Click any row "
+        "below for what it specifically means.",
         "Ordinary driving above ~22 mph, engaged and manual, on similar roads for "
         "both.",
     ),
     "Speed Disagreement": (
-        "How often you and the model disagree about speed. An override is you "
-        "pressing the gas while the model controls longitudinal — openpilot keeps "
-        "driving, so every press is a clean 'I want to go faster than this' signal. "
-        "Magnitude is the extra acceleration you demanded beyond the model's plan "
-        "(aEgo minus the vision plan's accel); speed taken back is how much speed "
-        "the model sheds in the 10 s after you lift off — the model fighting your "
-        "cruise speed; re-override is you pressing again within 15 s (persistent "
-        "disagreement); brake disengagements are the opposite direction — you "
-        "braking hard enough to kick the model out. The context table splits "
-        "overrides by situation: launches, plan-was-braking (exp-slowdown), lead "
+        "How often you and the model disagree about speed — an override is you "
+        "pressing the gas while the model controls longitudinal, and openpilot keeps "
+        "driving, so every press is a clean signal. Click any row above for what it "
+        "specifically measures. Two things separate from that scored table: brake "
+        "disengagements are the opposite direction — you braking hard enough to kick "
+        "the model out entirely (shown below, not part of this grade); the context "
+        "table splits overrides by situation — launches, plan-was-braking, lead "
         "pulling away, and open road.",
         "This measures your tolerance as much as the model — override only when "
         "you actually want more speed; every override is a labeled data point, so "

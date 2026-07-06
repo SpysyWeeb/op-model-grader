@@ -55,9 +55,12 @@ def test_no_text_io_without_explicit_encoding():
 
 
 def test_report_help_text_survives_utf8_round_trip():
-    """The actual character that crashed, straight from opgrader/report.py."""
-    from opgrader.report import CATEGORY_HELP
+    """The actual character that crashed. Originally lived in
+    CATEGORY_HELP["Smoothness"]'s prose; that text was trimmed once
+    accel_reversals grew its own per-row `desc` (the click-to-expand rollout)
+    and the character moved there with the concept it describes."""
+    from opgrader.grading import METRIC_BY_KEY
 
-    what, _how = CATEGORY_HELP["Smoothness"]
-    assert "↔" in what  # throttle<->brake
-    assert what.encode("utf-8").decode("utf-8") == what
+    desc = METRIC_BY_KEY["accel_reversals"].desc
+    assert "↔" in desc  # throttle<->brake
+    assert desc.encode("utf-8").decode("utf-8") == desc
