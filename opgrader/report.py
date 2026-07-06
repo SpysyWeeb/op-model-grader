@@ -1264,8 +1264,14 @@ a{color:var(--model)}
 .herohint{color:var(--muted);font-size:.85em;margin-top:12px}
 .callout{background:color-mix(in srgb, var(--model) 10%, var(--surface));
   border:1px solid var(--model);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:.9em}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;overflow-x:auto}
+/* CSS multi-column, not grid: grid rows stretch every item in a row to
+   match its tallest neighbor (Turns, after merging two categories into
+   one, towers over Ping-Pong/General Smoothness and leaves dead space
+   inside their shorter cards). Columns pack cards by actual height instead,
+   same responsive column-count-by-width behavior as the old grid. */
+.cards{column-width:340px;column-gap:14px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;
+  overflow-x:auto;break-inside:avoid;margin:0 0 14px}
 .card.ggold{border-color:var(--gold)}
 .cathead{display:flex;justify-content:space-between;align-items:baseline}
 .catgrade .letter{font-size:1.5rem;font-weight:700;margin-right:8px}
