@@ -7,7 +7,7 @@ from opgrader.lateral import (
     analyze_pingpong,
     detect_intent_windows,
     detect_turn_episodes,
-    highpass_angle,
+    pingpong_band,
     swing_reversal_count,
 )
 from opgrader.segments import segment_drive
@@ -38,14 +38,23 @@ def test_swing_reversals_ignore_small_wobble():
     assert swing_reversal_count(x, thresh=3.0) == 0
 
 
-def test_highpass_keeps_wobble_drops_ramp():
+def test_pingpong_band_keeps_fast_osc_drops_ramp():
     t = _t(30)
-    ramp = 2.0 * t  # slow maneuver trend
-    wob = 4.0 * np.sin(2 * np.pi * 1.5 * t)
-    resid = highpass_angle(t, ramp + wob)
-    # trend removed, oscillation mostly kept
+    ramp = 2.0 * t  # slow maneuver / road-following trend
+    wob = 4.0 * np.sin(2 * np.pi * 0.6 * t)  # ~1.7 s period fast ping-pong, in-band
+    resid = pingpong_band(t, ramp + wob)
+    # slow trend removed, the fast oscillation mostly kept
     assert abs(np.mean(resid[500:-500])) < 0.3
-    assert np.std(resid[500:-500]) == pytest.approx(np.std(wob), rel=0.2)
+    assert np.std(resid[500:-500]) == pytest.approx(np.std(wob), rel=0.25)
+
+
+def test_pingpong_band_drops_slow_weave():
+    """A slow (>~4 s) weave is road-following, not ping-pong -- the band must
+    reject it even at a large amplitude, so it can't masquerade as hunting."""
+    t = _t(40)
+    slow = 10.0 * np.sin(2 * np.pi * (1 / 8.0) * t)  # 8 s period, big amplitude
+    resid = pingpong_band(t, slow)
+    assert np.std(resid[800:-800]) < 0.25 * np.std(slow)  # strongly attenuated
 
 
 def _turn_profile(dur=30.0, peak=120.0, overshoot=-24.0):
@@ -598,6 +607,53 @@ def test_pingpong_single_bin_insufficient_for_overall_score():
     assert pp is not None
     assert pp.bins[0].score is not None
     assert pp.score is None
+
+
+def test_pingpong_absolute_scored_when_no_manual_baseline():
+    """Fast oscillation on an engaged highway stretch with NO manual steering
+    in that bin is scored on absolute anchors (abs_scored) instead of showing
+    'no data' -- the real fix, so ping-pong at speed gets graded."""
+    dur = 80.0
+    t = _t(dur)
+    angle = 6.0 * np.sin(2 * np.pi * 0.6 * t)  # ~1.7 s back-and-forth, big
+    d = make_drive(dur, vEgo=17.9, steeringAngleDeg=angle,  # ~40 mph -> 35-55 bin
+                   enabled=True, latActive=True, longActive=True)
+    seg, da = _prep(d)
+    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    b = pp.bins[4]  # 35-55 mph
+    assert b.engaged_s > 30 and b.manual_s == 0
+    assert b.abs_scored is True
+    assert b.score is not None and b.score < 40  # heavy fast sawing -> poor
+
+
+def test_pingpong_absolute_quiet_highway_scores_high():
+    """A steady line at highway speed (no manual baseline) scores well on the
+    absolute anchors -- a good model isn't penalized for having no human ref."""
+    dur = 80.0
+    t = _t(dur)
+    angle = 0.3 * np.sin(2 * np.pi * 0.6 * t)  # barely any wheel motion
+    d = make_drive(dur, vEgo=17.9, steeringAngleDeg=angle,
+                   enabled=True, latActive=True, longActive=True)
+    seg, da = _prep(d)
+    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    b = pp.bins[4]
+    assert b.abs_scored is True
+    assert b.score is not None and b.score > 90
+
+
+def test_pingpong_slow_weave_not_penalized_as_pingpong():
+    """A big but SLOW (8 s) weave at highway speed is road-following, not
+    ping-pong -- the tight band rejects it, so the bin still scores well."""
+    dur = 90.0
+    t = _t(dur)
+    angle = 10.0 * np.sin(2 * np.pi * (1 / 8.0) * t)  # 8 s period, ±10 deg
+    d = make_drive(dur, vEgo=17.9, steeringAngleDeg=angle,
+                   enabled=True, latActive=True, longActive=True)
+    seg, da = _prep(d)
+    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    b = pp.bins[4]
+    assert b.abs_scored is True
+    assert b.score is not None and b.score > 85  # slow weave != ping-pong
 
 
 def test_commanded_angle_roundtrip():

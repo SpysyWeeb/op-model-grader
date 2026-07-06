@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .events import DriveArrays, Event, _contiguous_runs, _idx_after
-from .grading import MIN_SCORED_FOR_CATEGORY
+from .grading import MIN_SCORED_FOR_CATEGORY, score_absolute
 from .metrics import rms, smooth
 from .segments import Segmentation
 
@@ -55,11 +55,46 @@ CONFLICT_MIN_S = 0.3  # sustained opposition needed to count as genuine resistan
 PP_BINS_MPH: list[tuple[float, float]] = [
     (0, 5), (5, 10), (10, 20), (20, 35), (35, 55), (55, 200),
 ]
-PP_HP_WINDOW_S = 2.0  # high-pass = signal minus centered 2 s moving average
+# Ping-pong is FAST: a real back-and-forth completes in ~2 s; anything slower
+# is the car holding a curving road, not hunting (owner's own definition,
+# confirmed on real data -- the slow ~5-9 s weave is road-following, present on
+# good and bad models alike). So the detrend stays tight: band = smooth(SHORT)
+# - smooth(LONG) keeps oscillation with period ~PP_BAND_SHORT..2xPP_BAND_LONG
+# s. smooth(LONG=2s) removes the slow intended path (turns, road-following);
+# smooth(SHORT) drops sensor noise. The number that actually distinguishes
+# ping-pong is the REVERSAL RATE on this residual ("how quickly the wheel
+# saws"): genuine fast ping-pong runs 40-60 reversals/min (period ~1-2 s);
+# road-following weave is few/slow. This is essentially the original 2 s
+# high-pass -- the measurement was never the bug.
+PP_BAND_SHORT_S = 0.3
+PP_BAND_LONG_S = 2.0
 PP_SWING_DEG = 3.0  # min swing between extrema to count a reversal
 PP_MIN_BIN_S = 30.0  # per side, to score a speed bin
 PP_SUB_BIN_MIN_S = 60.0  # engaged seconds needed for a 1 mph sub-bin row
 PP_WORST_WINDOW_S = 10.0
+
+# The REAL fix: bins with no manual baseline (you rarely hand-steer above
+# ~20 mph) could never be scored, so ping-pong at speed was invisible in the
+# grade even though the metric measured it. These absolute anchors (osc RMS
+# deg, reversal rate /min at 100/50/0) score such bins directly. Applied only
+# to 10-20 mph and up: below that, tight low-speed maneuvering (parking) looks
+# identical to ping-pong on any hands-off metric and genuinely needs the
+# human ratio baseline. Calibrated from 3 real Palisade routes / 73 segments
+# (tight-window pooled): a steady model runs ~1-2 reversals/min on the highway
+# and 5-35/min in town; genuine fast ping-pong pushes reversal rate well above
+# that (route 27: 50/min at 10-20, individual episodes 60+). Reversal rate is
+# weighted as the primary signal; amplitude is secondary (it double-counts
+# legitimate maneuvering at low speed). Keyed by the (lo, hi) mph tuple.
+PP_ABS_REV_ANCHORS: dict[tuple[float, float], tuple[float, float, float]] = {
+    (10, 20): (20.0, 45.0, 75.0),
+    (20, 35): (5.0, 20.0, 40.0),
+    (35, 55): (3.0, 15.0, 30.0),
+}
+PP_ABS_RMS_ANCHORS: dict[tuple[float, float], tuple[float, float, float]] = {
+    (10, 20): (2.5, 5.5, 9.0),
+    (20, 35): (1.0, 2.8, 5.0),
+    (35, 55): (0.6, 1.6, 3.0),
+}
 
 INTENT_MAX_V = 20 * MPH  # 8.9 m/s
 INTENT_WINDOW_S = 20.0
@@ -71,9 +106,13 @@ INTENT_LANE_DEG = 20.0  # < this => lane change
 # ------------------------------------------------------------------ helpers
 
 
-def highpass_angle(t: np.ndarray, angle: np.ndarray) -> np.ndarray:
-    """Angle minus its centered 2 s moving average (keeps wobble, drops maneuver)."""
-    return angle - smooth(t, angle, PP_HP_WINDOW_S)
+def pingpong_band(t: np.ndarray, angle: np.ndarray) -> np.ndarray:
+    """Tight band-pass isolating fast ping-pong: smooth(SHORT) - smooth(LONG).
+    smooth(LONG=2s) is the intended path (turns, road-following) and is
+    subtracted off; smooth(SHORT) strips sensor noise. Keeps only the fast
+    back-and-forth (period up to ~2xPP_BAND_LONG s) -- a slower weave is the
+    car holding a curving road, not hunting, and is deliberately excluded."""
+    return smooth(t, angle, PP_BAND_SHORT_S) - smooth(t, angle, PP_BAND_LONG_S)
 
 
 def swing_reversal_count(x: np.ndarray, thresh: float = PP_SWING_DEG) -> int:
@@ -448,6 +487,10 @@ class PingPongBin:
     engaged_rev: float | None = None  # reversals/min
     manual_rev: float | None = None
     score: float | None = None
+    # True when scored on ABSOLUTE anchors (no manual baseline in this bin)
+    # rather than the ratio vs your own driving -- the report flags this so a
+    # reader knows the number isn't relative to their manual steering.
+    abs_scored: bool = False
     # driver-profile pooling (see profile.py): set only when pooled history
     # for this bin's speed label exists; None/0 means "not pooled", i.e.
     # this bin is scored exactly as if profiling didn't exist
@@ -508,7 +551,7 @@ def analyze_pingpong(
             t = da.t[sl]
             v = da.v[sl]
             angle = da.steering_angle[sl]
-            resid = highpass_angle(t, angle)
+            resid = pingpong_band(t, angle)
             base = np.ones(len(t), bool)
             if da.standstill is not None:
                 base &= ~da.standstill[sl]
@@ -553,19 +596,31 @@ def analyze_pingpong(
             b = PingPongBin(lo, hi)
             b.engaged_rms, b.engaged_rev, b.engaged_s = finish(accs[("engaged", i)])
             b.manual_rms, b.manual_rev, b.manual_s = finish(accs[("manual", i)])
-            if (
-                b.engaged_s >= min_s
-                and b.manual_s >= min_s
-                and b.engaged_rms is not None
-                and b.manual_rms is not None
-            ):
+            if b.engaged_s < min_s or b.engaged_rms is None:
+                out.append(b)
+                continue
+            if b.manual_s >= min_s and b.manual_rms is not None:
+                # ratio vs your own steering in this bin -- rms and reversal
+                # rate weighted equally
                 s_rms = score_fn(b.engaged_rms, b.manual_rms)
-                s_rev = (
-                    score_fn(b.engaged_rev, b.manual_rev)
-                    if b.engaged_rev is not None and b.manual_rev is not None
-                    else None
-                )
-                b.score = float(np.mean([s for s in (s_rms, s_rev) if s is not None]))
+                s_rev = (score_fn(b.engaged_rev, b.manual_rev)
+                         if b.engaged_rev is not None and b.manual_rev is not None else None)
+                parts = [(s, 1.0) for s in (s_rms, s_rev) if s is not None]
+            elif (lo, hi) in PP_ABS_REV_ANCHORS:
+                # no manual baseline -> absolute anchors. Reversal RATE is the
+                # primary "how fast the wheel saws" ping-pong signal (weight 2);
+                # amplitude is secondary (weight 1 -- it double-counts the big
+                # but legitimate steering of low-speed maneuvering).
+                s_rev = (score_absolute(b.engaged_rev, PP_ABS_REV_ANCHORS[(lo, hi)])
+                         if b.engaged_rev is not None else None)
+                s_rms = (score_absolute(b.engaged_rms, PP_ABS_RMS_ANCHORS[(lo, hi)])
+                         if b.engaged_rms is not None else None)
+                parts = [(s, w) for s, w in ((s_rev, 2.0), (s_rms, 1.0)) if s is not None]
+                b.abs_scored = True
+            else:
+                parts = []
+            if parts:
+                b.score = float(sum(s * w for s, w in parts) / sum(w for _, w in parts))
             out.append(b)
         return out
 

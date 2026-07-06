@@ -18,7 +18,7 @@ from . import __version__
 from .events import DriveArrays, Event
 from .grading import CategoryResult, GradeReport, MetricResult, S_CUTOFF
 from .metrics import derivative
-from .lateral import PP_HP_WINDOW_S, highpass_angle
+from .lateral import PP_BAND_LONG_S, pingpong_band
 
 _ASSETS = Path(__file__).resolve().parent / "assets" / "uplot"
 
@@ -110,8 +110,8 @@ def _series_for_event(ev: Event, da: DriveArrays) -> list[dict]:
             out.append({"label": "driver torque", "unit": "raw", "data": ds(da.driver_torque[sl])})
     elif ev.kind == "pingpong":
         if da.steering_angle is not None:
-            resid = highpass_angle(t, da.steering_angle[sl])
-            out.append({"label": f"high-passed angle ({PP_HP_WINDOW_S:.0f}s)", "unit": "°", "data": ds(resid)})
+            resid = pingpong_band(t, da.steering_angle[sl])
+            out.append({"label": f"ping-pong band (<{2 * PP_BAND_LONG_S:.0f}s osc)", "unit": "°", "data": ds(resid)})
         out.append({"label": "vEgo", "unit": "m/s", "data": ds(da.v[sl])})
     elif ev.kind == "cf_turnin":
         if da.desired_curv is not None:
@@ -365,6 +365,8 @@ def _pingpong_card(cat: CategoryResult) -> str:
         rows = []
         for b in bs:
             score = f"{b.score:.0f}" if b.score is not None else "–"
+            if b.score is not None and b.abs_scored:
+                score += '<span class="muted">*</span>'  # absolute anchors, no manual baseline
             manual_rms = _fmt(b.manual_rms)
             manual_rev = _fmt(b.manual_rev, 1)
             if b.pooled_n > 0:
@@ -402,11 +404,16 @@ def _pingpong_card(cat: CategoryResult) -> str:
     <tbody>{bin_rows(bins)}</tbody>
   </table>
   {sub_html}
-  <p class="muted">Oscillation = steering angle minus its centered 2 s moving average; reversals
-  counted when the swing between extrema exceeds 3°. A bin is scored only with ≥30 s on each side;
-  category score is the engaged-time-weighted mean of bin scores. "w/ +N pooled" means the manual
-  baseline for that bin also draws on N other routes from your driver profile (model/engaged data
-  is never pooled, only your own driving).</p>"""
+  <p class="muted">Oscillation = the fast (&lt;~4 s) component of the steering angle — the wheel
+  sawing back and forth — with the slow intended path (turns, road-following) and sensor noise
+  removed; reversals counted when the swing between extrema exceeds 3°. Reversal RATE is the main
+  ping-pong signal (how fast the wheel saws); a steady model runs ~1–2 reversals/min on the highway.
+  A bin needs ≥30 s engaged to score. With ≥30 s of your own manual steering in that bin it is scored
+  as a ratio to your driving; without it (you rarely hand-steer at speed) the bin is scored on
+  absolute anchors instead — marked <strong>*</strong> — with reversal rate weighted double the
+  amplitude. Category score is the engaged-time-weighted mean of bin scores. "w/ +N pooled" means the
+  manual baseline for that bin also draws on N other routes from your driver profile (model/engaged
+  data is never pooled, only your own driving).</p>"""
 
 
 def _breakdown_tables(breakdowns: dict) -> str:
@@ -694,15 +701,17 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "ordinary traffic provides these; more time spent following = better data.",
     ),
     "Ping-Pong": (
-        "Steering-wheel oscillation by speed range. Oscillation RMS is the wobble left "
-        "over after the intended maneuver is removed (degrees of wheel); reversal rate "
-        "is direction flips per minute bigger than 3°. Each speed bin is scored "
-        "against your own steering in that same bin; the worst bin is called out.",
+        "The wheel sawing back and forth by speed range — fast oscillation only (a "
+        "back-and-forth in under ~4 s; a slower weave is the car holding a curving "
+        "road, not hunting). Reversal rate (flips per minute over 3°) is the main "
+        "signal for how fast it saws; oscillation RMS is the amplitude. Bins where you "
+        "have manual steering are scored against your own driving; faster bins where "
+        "you don't are scored on absolute anchors (marked *) instead.",
         "Hands-off engaged (or AOL) steering at a variety of speeds — touching the "
-        "wheel excludes those moments from the model's data. Low-speed creep (parking "
-        "lots, drive-thrus) fills the 1–10 mph bins where ping-pong is worst; note "
-        "your own low-speed manual maneuvering naturally raises the human baseline "
-        "there.",
+        "wheel excludes those moments from the model's data. The clearest signal is "
+        "highway speed, where a good model should hold a rock-steady line; low-speed "
+        "creep (parking, tight corners) legitimately involves big steering, so those "
+        "bins lean on your own manual driving as the baseline.",
     ),
     "Turns": (
         "Everything about how turns are carried out: unwind quality after the apex, "
@@ -1144,8 +1153,11 @@ def render_report(analysis, out_path: str | Path) -> Path:
   <p><strong>Lateral definitions</strong> (matching the on-device analyzer): turn onset at |angle| ≥ 20°
   (actual or commanded, whichever first); unwind point = first fall to ≤ 50% of that signal's peak;
   sharp turn = peak ≥ 90° with onset speed &lt; 15 mph; positive angle = left (ISO). Commanded angle =
-  VehicleModel(carParams).get_steer_from_curvature(−actuators.curvature, vEgo). Ping-pong = high-passed
-  steering angle (minus centered 2 s mean), per speed bin, standstill and steeringPressed excluded.
+  VehicleModel(carParams).get_steer_from_curvature(−actuators.curvature, vEgo). Ping-pong band =
+  smooth(0.3 s) − smooth(2 s) of the steering angle (keeps only the fast &lt;~4 s back-and-forth, drops
+  slow road-following and sensor noise), per speed bin, standstill and steeringPressed excluded; bins
+  without ≥30 s of manual steering are scored on absolute anchors (reversal rate weighted 2× amplitude)
+  rather than a ratio.
   <strong>Peak turn-in effort</strong> (Turns, shown not scored) is the highest
   |controlsState.lateralControlState.torqueState.output| reached from turn onset up to the instant you
   first touched the wheel (steeringPressed), or across the whole episode if you never did — deliberately
