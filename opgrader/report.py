@@ -715,15 +715,14 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "turns build the baseline it's compared against.",
     ),
     "Turn-In Timing": (
-        "Blinker-free, same turn episodes as Turn Execution. Onset timing: how much "
-        "later (+) or sooner (−) the model's commanded path called for the turn vs. "
-        "when the wheel actually turned in — that instant is the 'You: 0.00' "
-        "reference, so Model reads as a lead/lag against it; scored on every engaged "
-        "turn. Resisted divergence: only scores turns where you genuinely fought the "
-        "model's steering (opposing torque, sustained ≥ 0.3 s) — Model/You show the "
-        "angle each side actually held at the peak of the disagreement, so you can "
-        "see who wanted the sharper turn. No resistance means no score on that row, "
-        "not a zero.",
+        "Onset timing: how much later (+) or sooner (−) the model's commanded path "
+        "called for the turn vs. when the wheel actually turned in — that instant is "
+        "the 'You: 0.00' reference, so Model reads as a lead/lag against it; scored "
+        "on every engaged turn. Resisted divergence: only scores turns where you "
+        "genuinely fought the model's steering (opposing torque, sustained ≥ 0.3 s) "
+        "— Model/You show the angle each side actually held at the peak of the "
+        "disagreement, so you can see who wanted the sharper turn. No resistance "
+        "means no score on that row, not a zero.",
         "Any turn sharpens the onset-timing rows. Resisted divergence specifically "
         "needs moments you pushed back against the model's steering, not just "
         "touched the wheel — never resisting means nothing to measure there.",
