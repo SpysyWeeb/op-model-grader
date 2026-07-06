@@ -280,26 +280,47 @@ def _driver_cell(m: MetricResult) -> str:
 
 
 def _metric_rows(metrics: list[MetricResult], row_overrides: dict | None = None) -> str:
-    """row_overrides: {metric_key: {"model_deg": float, "you_deg": float, "n": int}}
-    -- lets a specific category (Turn-In Timing's resisted-divergence rows)
-    show a more interpretable pair of numbers than the generic Model/You
-    aggregate, without teaching this shared renderer about any one metric."""
+    """row_overrides: {metric_key: {"model_deg"|"model_txt": ..., "you_deg"|"you_txt": ...,
+    "n": int}} -- lets a specific category show a more interpretable pair of
+    cells than the generic Model/You aggregate (a "_deg" value is formatted
+    like any other number; a "_txt" value is used verbatim, for a fixed
+    reference string like "0.00 (reference)"). Either side of a pair can be
+    overridden independently -- the other falls back to normal rendering.
+    Keeps the shared renderer ignorant of any one specific metric."""
     row_overrides = row_overrides or {}
     rows = []
     for m in metrics:
         d = m.definition
-        if d.scorer == "none":
-            continue  # diagnostic-only; not worth a row (see cmd_unwind_lead_*, cmd_onset_lead_*)
-        ov = row_overrides.get(d.key)
-        if ov:
-            model_txt = _fmt(ov.get("model_deg"))
-            you_txt = _fmt(ov.get("you_deg"))
-            if ov.get("n"):
-                you_txt += f' <span class="muted">(n={ov["n"]})</span>'
+        if d.scorer == "none" and not d.show_unscored:
+            continue  # diagnostic-only; not worth a row (see cmd_unwind_lead_*)
+        ov = row_overrides.get(d.key) or {}
+        if "model_txt" in ov:
+            model_txt = ov["model_txt"]
+        elif "model_deg" in ov:
+            model_txt = _fmt(ov["model_deg"])
         else:
             model_txt = _fmt(m.model_agg)
+        if "you_txt" in ov:
+            you_txt = ov["you_txt"]
+        elif "you_deg" in ov:
+            you_txt = _fmt(ov["you_deg"])
+        else:
             you_txt = _driver_cell(m)
-        if m.score is None:
+        if ov.get("n") and ("you_deg" in ov or "you_txt" in ov):
+            you_txt += f' <span class="muted">(n={ov["n"]})</span>'
+        if d.scorer == "none":
+            # show_unscored=True got it past the hide rule above, but it's
+            # still not a grade -- "insufficient data" below would be a lie
+            # when there's plenty of data, just no scoring formula for it.
+            note = d.note or "not scored"
+            if m.n_model == 0:
+                note = "no data"
+            rows.append(
+                f'<tr class="insuff"><td>{_esc(d.label)}</td>'
+                f"<td>{model_txt}</td><td>{you_txt}</td>"
+                f"<td>{_esc(d.unit)}</td><td>{_esc(note)}</td></tr>"
+            )
+        elif m.score is None:
             need_d = " each" if d.needs_driver else ""
             note = f"insufficient data (model n={m.n_model}, you n={m.n_driver}, need ≥3{need_d})"
             rows.append(
@@ -683,14 +704,24 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "swings past center the other way (as % of the turn's peak angle); recovery "
         "wobbles counts extra swings; unwind rate is how quickly the wheel comes back "
         "after the apex; driver-rescue rate is the share of model turns where you had "
-        "to grab the wheel (or it disengaged) during the straighten-out.",
+        "to grab the wheel (or it disengaged) during the straighten-out. Peak turn-in "
+        "effort is shown as extra context, not scored: the highest % of available "
+        "torque the model reached before you first touched the wheel (or across the "
+        "whole turn if you never did) — a rough answer to 'is the model actually "
+        "committing to this turn', though a low number isn't necessarily a flaw, since "
+        "some turns genuinely don't need much torque to execute.",
         "When it's safe, let the model finish turns on its own — every rescue is "
         "itself a data point, so intervening when needed still counts. Manual sharp "
         "turns build the baseline it's compared against.",
     ),
     "Turn-In Timing": (
         "Blinker-free: every engaged turn is checked directly, sharp or gentler, "
-        "signaled or not, the same turn episodes Turn Execution uses. This grade only "
+        "signaled or not, the same turn episodes Turn Execution uses. Two different "
+        "questions, both scored here. (1) Onset timing: how much later (+) or sooner "
+        "(-) the model's own commanded path called for the turn, vs. the instant the "
+        "wheel actually turned in — that instant is the reference point, shown as "
+        "'You: 0.00', so the Model column reads directly as a lead/lag relative to it. "
+        "Applies to every engaged turn, resisted or not. (2) Resisted divergence: only "
         "fires when you were genuinely fighting the model's steering — your torque "
         "pushing the opposite way from the model's own commanded torque, sustained at "
         "least 0.3 s, not just a hand resting on the wheel. In plain terms: you're both "
@@ -698,19 +729,18 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "you're willing to, so you took over and held a different angle — the Model/You "
         "columns show the typical angle each side actually held (in degrees) at the "
         "moment the disagreement peaked, so you can see directly whether the model "
-        "wanted MORE turn than you gave it or less; the Score column grades how big "
-        "that gap typically is. A continuously-replanning model rarely 'refuses' a turn "
-        "outright, so this is about how far reality drifted from its plan during a real "
-        "tug-of-war, not whether it technically commanded some path. Turns with no such "
-        "resistance score nothing (not a zero) — there was no disagreement to measure. "
+        "wanted MORE turn than you gave it or less. A continuously-replanning model "
+        "rarely 'refuses' a turn outright, so this is about how far reality drifted "
+        "from its plan during a real tug-of-war. Turns with no such resistance score "
+        "nothing on this row (not a zero) — there was no disagreement to measure. "
         "(A different, blinker-based 'Blinker turn intents' table elsewhere in this "
         "report only covers turns you signaled below 20 mph — that's a separate, "
         "unscored diagnostic, not this grade.)",
         "Any turn counts, manual or model-driven, sharp or gentle, signaled or not "
-        "— more of them sharpens this grade. This one specifically wants moments "
-        "you actually resisted the model's steering (not just touched the wheel) "
-        "— if you never push back against a turn the model gets wrong, there's "
-        "nothing here to measure it.",
+        "— more of them sharpens the onset-timing rows. The resisted-divergence rows "
+        "specifically want moments you actually resisted the model's steering (not "
+        "just touched the wheel) — if you never push back against a turn the model "
+        "gets wrong, there's nothing here to measure it.",
     ),
     "General Smoothness": (
         "Overall steering comfort at speed: RMS lateral jerk is side-to-side "
@@ -818,10 +848,17 @@ def _category_card(cat: CategoryResult) -> str:
     else:
         row_overrides = None
         if cat.name == "Turn-In Timing":
+            row_overrides = {}
             angles = cat.extra.get("resisted_angles") if cat.extra else None
             if angles:
-                row_overrides = {
-                    f"resisted_divergence_{side}": vals for side, vals in angles.items()
+                for side, vals in angles.items():
+                    row_overrides[f"resisted_divergence_{side}"] = vals
+            # onset timing is measured relative to when the wheel itself
+            # turned in -- that instant IS "you", so it's always exactly
+            # zero by construction, not a real aggregate to compute.
+            for side in ("left", "right"):
+                row_overrides[f"cmd_onset_lead_{side}"] = {
+                    "you_txt": '0.00 <span class="muted">(reference — when the wheel actually turned in)</span>'
                 }
         body = f"""
   <table class="mtable">
@@ -1143,11 +1180,19 @@ def render_report(analysis, out_path: str | Path) -> Path:
   sharp turn = peak ≥ 90° with onset speed &lt; 15 mph; positive angle = left (ISO). Commanded angle =
   VehicleModel(carParams).get_steer_from_curvature(−actuators.curvature, vEgo). Ping-pong = high-passed
   steering angle (minus centered 2 s mean), per speed bin, standstill and steeringPressed excluded.
+  <strong>Peak turn-in effort</strong> (Turn Execution, shown not scored) is the highest
+  |controlsState.lateralControlState.torqueState.output| reached from turn onset up to the instant you
+  first touched the wheel (steeringPressed), or across the whole episode if you never did — deliberately
+  stops there because torque_output changes once you take over (it may be fighting your input rather
+  than executing its own plan at that point), so looking past that instant would misread a correction as
+  an admission the model wasn't trying.
   <strong>Turn-In Timing is blinker-free</strong>: it scores the same turn episodes as Turn Execution,
-  every engaged turn regardless of band. Cmd-onset lead (the model's own commanded-angle 20° crossing
-  minus the actual angle's) is computed but no longer scored or shown — for a torque-controlled car under
-  normal control it's almost always ≈0s, so it added little signal and mostly padded the category score
-  upward; the Model/You columns on the divergence rows below carry the real story instead.
+  every engaged turn regardless of band. <strong>Cmd-onset timing</strong> is the model's own
+  commanded-angle 20° crossing minus the actual angle's 20° crossing — positive means the model's own
+  plan called for the turn AFTER the wheel had already gotten there, negative means it called for the
+  turn first. That crossing instant on the actual (wheel) side is the reference point the lead/lag is
+  measured against, so the You column always reads "0.00" by construction rather than a real aggregate —
+  the Model column is what actually varies. Scored on absolute anchors 0.0/0.5/1.5s → 100/50/0.
   <strong>Resisted cmd-vs-actual divergence</strong> replaces a torque-ceiling
   gate: a conflict window opens where steeringPressed is true AND your steering torque opposes the
   model's own commanded torque (torqueState.output; falls back to opposing actual-vs-commanded angle

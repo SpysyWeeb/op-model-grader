@@ -106,6 +106,11 @@ class MetricDef:
     abs_when_driver_below: float | None = None  # ratio_or_abs switch point
     needs_driver: bool = True
     note: str = ""
+    # A scorer="none" row is hidden from the report table by default (see
+    # report._metric_rows) -- most unscored rows are low-value diagnostics
+    # not worth the clutter. Set True for the rare case that's genuinely
+    # worth showing despite not (yet) having a defensible scoring formula.
+    show_unscored: bool = False
 
 
 METRICS: list[MetricDef] = [
@@ -158,6 +163,16 @@ METRICS: list[MetricDef] = [
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
     MetricDef("cmd_unwind_lead_right", "Cmd-vs-actual unwind lead (right)", "Turn Execution", "s",
               agg="mean", scorer="none", needs_driver=False, note="diagnostic, not scored"),
+    MetricDef(
+        "turn_effort_left", "Peak turn-in effort before any override (left)", "Turn Execution", "%",
+        scorer="none", needs_driver=False, show_unscored=True,
+        note="context only, not scored -- see help text below",
+    ),
+    MetricDef(
+        "turn_effort_right", "Peak turn-in effort before any override (right)", "Turn Execution", "%",
+        scorer="none", needs_driver=False, show_unscored=True,
+        note="context only, not scored -- see help text below",
+    ),
     # ---- Lateral / Turn-In Timing (per engaged turn episode, sharp or
     # curve-band, signaled or not -- blinker-free, sourced from the same
     # TurnEpisodes Turn Execution uses; see add_turn_samples)
@@ -178,18 +193,20 @@ METRICS: list[MetricDef] = [
         note="same metric and anchors as resisted_divergence_left, scoped to turns that went right",
     ),
     MetricDef(
-        "cmd_onset_lead_left", "Cmd-vs-actual onset lead (left)", "Turn-In Timing", "s",
-        agg="mean", scorer="none", needs_driver=False,
-        note="diagnostic, not scored -- for a torque-controlled car under normal control this is "
-        "almost always ~0s (the wheel tracks the commanded curve near-instantly), so it added little "
-        "signal and mostly just padded the category score upward",
+        "cmd_onset_lead_left", "Cmd-vs-actual onset timing (left)", "Turn-In Timing", "s",
+        agg="mean", scorer="abs", abs_anchors=(0.0, 0.5, 1.5), needs_driver=False,
+        note="how much later (+) or sooner (-) the model's own commanded path called for the turn, "
+        "vs. when the wheel actually turned in (that instant is the zero reference, shown as 'You: "
+        "0.00'). Absolute scale: 100 at <=0s (model committed at/before the wheel moved), 50 at 0.5s "
+        "late, 0 at >=1.5s late",
     ),
     MetricDef(
-        "cmd_onset_lead_right", "Cmd-vs-actual onset lead (right)", "Turn-In Timing", "s",
-        agg="mean", scorer="none", needs_driver=False,
-        note="diagnostic, not scored -- for a torque-controlled car under normal control this is "
-        "almost always ~0s (the wheel tracks the commanded curve near-instantly), so it added little "
-        "signal and mostly just padded the category score upward",
+        "cmd_onset_lead_right", "Cmd-vs-actual onset timing (right)", "Turn-In Timing", "s",
+        agg="mean", scorer="abs", abs_anchors=(0.0, 0.5, 1.5), needs_driver=False,
+        note="how much later (+) or sooner (-) the model's own commanded path called for the turn, "
+        "vs. when the wheel actually turned in (that instant is the zero reference, shown as 'You: "
+        "0.00'). Absolute scale: 100 at <=0s (model committed at/before the wheel moved), 50 at 0.5s "
+        "late, 0 at >=1.5s late",
     ),
     # ---- Lateral / General Smoothness (per span)
     MetricDef("rms_lat_jerk", "RMS lateral jerk", "General Smoothness", "m/s³", eps=0.02),
@@ -470,17 +487,22 @@ def add_turn_samples(samples: dict, turns) -> None:
     model's own unwind/onset, they're a human-forced one. Rescue itself is
     the rescue_rate signal.
 
-    resisted_divergence_{left,right} is the one exception: it is NOT gated on
-    contaminated/rescued, because sustained driver resistance against the
-    model's own steering IS the contamination mechanism -- gating it the
-    same way as the others would exclude precisely the cases it exists to
-    catch. It only scores episodes where lateral.detect_turn_episodes found
-    a genuine, sustained (>=0.3s) directional conflict (steering torque
-    opposing the model's own commanded torque); an episode with no such
-    conflict contributes nothing (not a zero), same as cmd_onset_lead. Split
-    left/right by ep.side, same convention as cmd_onset_lead_left/right. This
-    category is blinker-free and band-agnostic: every engaged turn counts,
-    sharp or curve, signaled or not (see lateral.detect_turn_episodes).
+    resisted_divergence_{left,right} and turn_effort_{left,right} are the
+    exceptions: neither is gated on contaminated/rescued. resisted_divergence
+    exists BECAUSE sustained driver resistance against the model's own
+    steering is the contamination mechanism -- gating it the same way as the
+    others would exclude precisely the cases it exists to catch. It only
+    scores episodes where lateral.detect_turn_episodes found a genuine,
+    sustained (>=0.3s) directional conflict (steering torque opposing the
+    model's own commanded torque); an episode with no such conflict
+    contributes nothing (not a zero), same as cmd_onset_lead. turn_effort is
+    peak_effort_frac, which is ALREADY scoped (in lateral.py) to stop at the
+    driver's first touch, so it needs no further gating here -- a
+    contaminated episode's pre-contamination effort is exactly what it's
+    for. Split left/right by ep.side, same convention as
+    cmd_onset_lead_left/right. This category is blinker-free and
+    band-agnostic: every engaged turn counts, sharp or curve, signaled or
+    not (see lateral.detect_turn_episodes).
     """
 
     def add(key, side, value):
@@ -496,6 +518,8 @@ def add_turn_samples(samples: dict, turns) -> None:
             add("rescue_rate", "model", 100.0 if ep.rescued else 0.0)
         if ep.engaged:
             add(f"resisted_divergence_{ep.side}", "model", ep.divergence_deg)
+        if ep.engaged and ep.peak_effort_frac is not None:
+            add(f"turn_effort_{ep.side}", "model", ep.peak_effort_frac * 100.0)
         if ep.engaged and (ep.contaminated or ep.rescued):
             continue
         # sharp turns feed the scored metrics; 20-90 deg curve episodes are

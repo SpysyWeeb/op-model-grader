@@ -1,5 +1,5 @@
-from opgrader.grading import METRIC_BY_KEY, S_CUTOFF, MetricResult, letter
-from opgrader.report import _grade_class, _lettered_score, _metric_rows
+from opgrader.grading import CategoryResult, METRIC_BY_KEY, S_CUTOFF, MetricResult, letter
+from opgrader.report import _category_card, _grade_class, _lettered_score, _metric_rows
 
 
 def test_grade_class_gold_for_perfect_score():
@@ -26,14 +26,30 @@ def test_lettered_score_never_shows_100_unless_truly_s_tier():
 
 
 def test_metric_rows_hides_unscored_diagnostics():
-    """scorer='none' rows (cmd_unwind_lead_*, curve_*, cmd_onset_lead_*) are
-    computed but not worth a table row -- they'd otherwise clutter the card
-    with 'diagnostic, not scored' filler."""
+    """scorer='none' rows (cmd_unwind_lead_*, curve_*) are computed but not
+    worth a table row -- they'd otherwise clutter the card with 'diagnostic,
+    not scored' filler."""
     d = METRIC_BY_KEY["cmd_unwind_lead_left"]
     assert d.scorer == "none"
+    assert d.show_unscored is False
     m = MetricResult(definition=d, model_vals=[0.4, 0.5, 0.6], driver_vals=[])
     m.model_agg = 0.5
     assert _metric_rows([m]) == ""
+
+
+def test_metric_rows_show_unscored_escape_hatch():
+    """turn_effort_* is scorer='none' too (no defensible scoring formula
+    yet) but IS worth showing -- show_unscored=True keeps it out of the
+    blanket hide rule above."""
+    d = METRIC_BY_KEY["turn_effort_left"]
+    assert d.scorer == "none"
+    assert d.show_unscored is True
+    m = MetricResult(definition=d, model_vals=[40.0, 60.0, 90.0], driver_vals=[])
+    m.model_agg = 60.0
+    html = _metric_rows([m])
+    assert html != ""
+    assert "60.00" in html
+    assert "not scored" in html  # still reads as context, not a grade
 
 
 def test_metric_rows_row_override_replaces_model_you_cells():
@@ -53,3 +69,29 @@ def test_metric_rows_no_override_uses_normal_rendering():
     m.score = 51.0
     html = _metric_rows([m])
     assert "80.00" in html
+
+
+def test_category_card_turn_in_timing_onset_lead_shows_reference_you():
+    """cmd_onset_lead's 'You' is always exactly 0.00 by construction (the
+    lead/lag is measured relative to when the wheel itself turned in) --
+    _category_card must wire that reference text in, not leave the normal
+    (empty, since needs_driver=False) You cell showing '-'."""
+    d = METRIC_BY_KEY["cmd_onset_lead_left"]
+    m = MetricResult(definition=d, model_vals=[0.3, 0.4, 0.5], driver_vals=[])
+    m.model_agg, m.score = 0.4, 62.0
+    cat = CategoryResult(name="Turn-In Timing", weight=0.20, metrics=[m])
+    html = _category_card(cat)
+    assert "0.00" in html and "reference" in html
+    assert "0.40" in html  # the real model_agg is untouched
+
+
+def test_category_card_turn_in_timing_resisted_angles_wired_from_extra():
+    d = METRIC_BY_KEY["resisted_divergence_left"]
+    m = MetricResult(definition=d, model_vals=[70.0, 80.0, 90.0], driver_vals=[])
+    m.model_agg, m.score = 80.0, 51.0
+    cat = CategoryResult(
+        name="Turn-In Timing", weight=0.20, metrics=[m],
+        extra={"resisted_angles": {"left": {"model_deg": 82.3, "you_deg": 45.1, "n": 12}}},
+    )
+    html = _category_card(cat)
+    assert "82.30" in html and "45.10" in html and "(n=12)" in html

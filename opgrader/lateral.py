@@ -151,6 +151,13 @@ class TurnEpisode:
     initiator: str = "unknown"  # "model" | "driver" | "lag" | "unknown" -- DESCRIPTIVE, not scored
     torque_ceiling_pre_override: bool | None = None  # diagnostic only, see module docstring
     torque_ceiling_direction_agrees: bool | None = None  # only meaningful when the above is True
+    # Peak |torque_output| (0..1) reached BEFORE override_onset_t (or across
+    # the whole episode if never overridden) -- "is the model actually
+    # committing", not just "did it eventually cross some ceiling". Shown,
+    # not scored: a low value could mean the model isn't trying, but it can
+    # just as easily mean this particular turn never needed much torque --
+    # torque alone can't distinguish those, so this is context, not a grade.
+    peak_effort_frac: float | None = None
     # SCORED quantity: peak |actual - commanded| angle during a sustained
     # window of genuine driver resistance (steering torque opposing the
     # model's own commanded torque, sustained >= CONFLICT_MIN_S). None if no
@@ -327,6 +334,16 @@ def detect_turn_episodes(
                             )
                     # else: <0.3s of pre-override data exists at all -- can't
                     # judge, torque_ceiling_pre_override stays None
+
+                # Quantified effort (unlike the binary ceiling check above,
+                # this applies whether or not the episode was ever
+                # overridden): peak |torque_output| from episode onset to
+                # override_onset_t, or to the episode's own end if the
+                # driver never touched the wheel at all.
+                if torque is not None:
+                    pre_end = a + op_idx if op_idx is not None else b
+                    if pre_end > a:
+                        ep.peak_effort_frac = float(np.max(np.abs(torque[a:pre_end])))
 
             # SCORED: cmd-vs-actual divergence during genuine driver
             # resistance. "Resistance" = steeringPressed AND the driver's

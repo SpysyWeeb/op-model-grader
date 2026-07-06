@@ -413,6 +413,57 @@ def test_torque_ceiling_pre_override_none_without_torque_channel():
     assert eps[0].torque_ceiling_pre_override is None
 
 
+def test_peak_effort_frac_never_overridden_uses_whole_episode():
+    """No override at all -> the pre-override window is the whole episode,
+    not None: a clean model-only turn should still get an effort reading."""
+    dur = 30.0
+    n = int(dur / DT)
+    t = np.arange(n) * DT
+    act = np.zeros(n)
+    act[(t >= 2.0) & (t < 9.0)] = 120.0
+    torque_out = np.where((t >= 2.0) & (t < 5.0), 0.6, 0.1)  # peaks at 0.6 mid-turn, never pressed
+    d = make_drive(dur, vEgo=5.0, steeringAngleDeg=act, torqueOutput=torque_out,
+                   enabled=True, latActive=True, longActive=True)
+    seg, da = _prep(d)
+    eps = detect_turn_episodes("synth", seg, da)
+    assert len(eps) == 1
+    ep = eps[0]
+    assert ep.override_onset_t is None
+    assert ep.peak_effort_frac == pytest.approx(0.6, abs=0.02)
+
+
+def test_peak_effort_frac_stops_at_override_not_the_full_episode():
+    """The whole point: a huge post-override torque swing (the controller
+    fighting/correcting once the driver takes over) must NOT count as
+    effort -- only the window up to the first press matters."""
+    dur = 30.0
+    n = int(dur / DT)
+    t = np.arange(n) * DT
+    act = np.zeros(n)
+    act[(t >= 2.0) & (t < 9.0)] = 120.0
+    # modest 0.4 pre-press, then a full-scale 1.0 swing right after the driver takes over
+    torque_out = np.where(t < 4.0, 0.4, np.where(t < 8.0, 1.0, 0.0))
+    pressed = _pressed_window(t, 4.0, 8.0)
+    d = make_drive(dur, vEgo=5.0, steeringAngleDeg=act, torqueOutput=torque_out,
+                   steeringPressed=pressed, enabled=True, latActive=True, longActive=True)
+    seg, da = _prep(d)
+    eps = detect_turn_episodes("synth", seg, da)
+    assert len(eps) == 1
+    ep = eps[0]
+    assert ep.override_onset_t == pytest.approx(4.0, abs=0.02)
+    assert ep.peak_effort_frac == pytest.approx(0.4, abs=0.02)  # NOT 1.0 from the post-override swing
+
+
+def test_peak_effort_frac_none_without_torque_channel():
+    t, act = _turn_profile()
+    d = make_drive(30.0, vEgo=5.0, steeringAngleDeg=act, enabled=True, latActive=True, longActive=True)
+    del d.channels["torqueOutput"]
+    seg, da = _prep(d)
+    eps = detect_turn_episodes("synth", seg, da)
+    assert len(eps) == 1
+    assert eps[0].peak_effort_frac is None
+
+
 def test_torque_ceiling_direction_disagrees():
     """Ceiling established before the override, but pointed the OPPOSITE
     way from how the turn ended up -- capability was available, just not

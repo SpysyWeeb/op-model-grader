@@ -23,7 +23,7 @@ def empty_samples():
 def _ep(engaged=True, sharp=True, contaminated=False, rescued=False,
         never_commanded=False, cmd_onset_lead=None, cmd_unwind_lead=None,
         initiator="unknown", divergence_deg=None, conflict_ceiling=None,
-        conflict_you_deg=None, conflict_model_deg=None,
+        conflict_you_deg=None, conflict_model_deg=None, peak_effort_frac=None,
         side="left", i=(0, 1)):
     """Minimal TurnEpisode for add_turn_samples/turn_in_breakdown wiring tests."""
     return TurnEpisode(
@@ -35,6 +35,7 @@ def _ep(engaged=True, sharp=True, contaminated=False, rescued=False,
         cmd_unwind_lead=cmd_unwind_lead, initiator=initiator,
         divergence_deg=divergence_deg, conflict_ceiling=conflict_ceiling,
         conflict_you_deg=conflict_you_deg, conflict_model_deg=conflict_model_deg,
+        peak_effort_frac=peak_effort_frac,
     )
 
 
@@ -185,16 +186,13 @@ def test_turn_in_delay_retired():
     assert not any(m.key == "turn_in_delay" for m in METRICS)
 
 
-def test_cmd_onset_lead_is_diagnostic_not_scored():
-    """Demoted: for a torque-controlled car this is almost always ~0s (the
-    wheel tracks the commanded curve near-instantly), so it added little
-    signal and mostly just padded the Turn-In Timing score upward -- kept
-    as a computed-but-unscored diagnostic, same treatment as cmd_unwind_lead."""
+def test_cmd_onset_lead_scored_metric_defs():
     for key in ("cmd_onset_lead_left", "cmd_onset_lead_right"):
         d = METRIC_BY_KEY[key]
         assert d.category == "Turn-In Timing"
-        assert d.scorer == "none"
+        assert d.scorer == "abs"
         assert d.needs_driver is False
+        assert d.abs_anchors == (0.0, 0.5, 1.5)
 
 
 def test_resisted_divergence_only_from_conflict_episodes():
@@ -310,15 +308,30 @@ def test_cmd_onset_lead_excluded_when_contaminated_or_rescued():
     assert samples["cmd_onset_lead_left"]["model"] == [0.4]
 
 
-def test_cmd_onset_lead_never_scores():
+def test_turn_effort_not_excluded_when_contaminated_or_rescued():
+    """Unlike cmd_onset_lead/unwind_lead, turn_effort is NOT gated on
+    contaminated/rescued: peak_effort_frac is already scoped (in lateral.py)
+    to stop at the driver's first touch, so a contaminated episode's
+    pre-contamination effort is exactly the interesting case, not noise."""
+    turns = [
+        _ep(engaged=True, peak_effort_frac=0.9, contaminated=False, rescued=False, side="left"),
+        _ep(engaged=True, peak_effort_frac=0.4, contaminated=True, side="left"),
+        _ep(engaged=True, peak_effort_frac=0.6, rescued=True, side="right"),
+        _ep(engaged=False, peak_effort_frac=0.99, side="left"),  # manual: excluded entirely
+    ]
     samples = empty_samples()
-    samples["cmd_onset_lead_left"]["model"] = [-0.3, -0.3, -0.3]
-    samples["cmd_onset_lead_right"]["model"] = [0.25, 0.25, 0.25]
+    add_turn_samples(samples, turns)
+    assert samples["turn_effort_left"]["model"] == [90.0, 40.0]
+    assert samples["turn_effort_right"]["model"] == [60.0]
+
+
+def test_cmd_onset_lead_anchor_scores():
+    samples = empty_samples()
+    samples["cmd_onset_lead_left"]["model"] = [-0.3, -0.3, -0.3]  # negative -> clipped to 100
+    samples["cmd_onset_lead_right"]["model"] = [0.25, 0.25, 0.25]  # halfway to the 50-point anchor
     rep = grade(samples)
     res = {m.definition.key: m for c in rep.categories for m in c.metrics}
-    assert res["cmd_onset_lead_left"].score is None
-    assert res["cmd_onset_lead_right"].score is None
-    # still aggregated for display even though it's not scored
-    assert res["cmd_onset_lead_left"].model_agg == pytest.approx(-0.3)
+    assert res["cmd_onset_lead_left"].score == pytest.approx(100.0)
+    assert res["cmd_onset_lead_right"].score == pytest.approx(75.0)
 
 
