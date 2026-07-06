@@ -61,15 +61,10 @@ ALL_BUCKETS = MODE_BUCKETS + PERSONALITY_BUCKETS
 CATEGORY_GROUPS = {
     "Lateral": {
         # Card order = dict order (see grade()'s "grp.categories = [cats[c]
-        # for c in weights]"), which also drives report.py's multi-column
-        # card packing. Turns is by far the tallest card in this group (it
-        # absorbed two former categories), so it's placed LAST -- CSS
-        # multi-column fills columns in strict content order, so the two
-        # short cards need to come first to end up packed together in one
-        # column instead of Turns splitting them across columns.
+        # for c in weights]"), which also drives report.py's card order.
         "Ping-Pong": 0.40,
-        "General Smoothness": 0.10,
         "Turns": 0.50,
+        "General Smoothness": 0.10,
     },
     "Longitudinal": {
         "Smoothness": 0.25,
@@ -218,10 +213,10 @@ METRICS: list[MetricDef] = [
         "way before settling, as a % of how far it turned into the turn. Higher means more overcorrection.",
     ),
     MetricDef(
-        "recovery_wobbles", "Recovery wobbles, >10° re-crossings (sharp turns)", "Turns", "/turn",
+        "recovery_wobbles", "Recovery wobbles, >5° re-crossings (sharp turns)", "Turns", "/turn",
         eps=0.1, scorer="ratio_or_abs", abs_anchors=(0.0, 1.0, 2.0), abs_when_driver_below=0.5,
         note="absolute scale (100 at 0, 50 at 1, 0 at ≥2 per turn) when your baseline is ~0",
-        desc="How many extra back-and-forth swings past 10° happen while settling out of a sharp "
+        desc="How many extra back-and-forth swings past 5° happen while settling out of a sharp "
         "turn, on top of the main overshoot. Higher means a twitchier finish.",
     ),
     MetricDef(

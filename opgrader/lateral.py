@@ -40,7 +40,7 @@ UNWIND_FRACTION = 0.5
 TURN_PEAK_MIN_DEG = 90.0  # sharp-turn peak threshold
 SHARP_MAX_ONSET_V = 15 * MPH  # 6.7 m/s
 OVERSHOOT_WINDOW_S = 4.0
-WOBBLE_MIN_DEG = 10.0
+WOBBLE_MIN_DEG = 5.0
 
 # initiator / torque-ceiling classification (who steered a sharp turn, and if
 # the driver did, was the model already commanding max torque beforehand).
@@ -402,7 +402,7 @@ def detect_turn_episodes(
                     ep.overshoot_deg = float(max(0.0, np.max(opp)))
                     ep.overshoot_pct = 100.0 * ep.overshoot_deg / abs(peak_act)
                     # recovery wobbles: zero re-crossings after the overshoot
-                    # excursion whose lobe exceeds 10 deg (0.5 deg deadband)
+                    # excursion whose lobe exceeds WOBBLE_MIN_DEG (0.5 deg deadband)
                     lobes: list[float] = []
                     cur_sign, cur_max = 0, 0.0
                     for val in w:
