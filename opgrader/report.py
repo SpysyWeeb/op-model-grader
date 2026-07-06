@@ -367,9 +367,6 @@ def _pingpong_card(cat: CategoryResult) -> str:
             score = f"{b.score:.0f}" if b.score is not None else "–"
             manual_rms = _fmt(b.manual_rms)
             manual_rev = _fmt(b.manual_rev, 1)
-            if b.pooled_n > 0:
-                manual_rms += f'<span class="muted"> ({_fmt(b.pooled_manual_rms)} w/ +{b.pooled_n} pooled)</span>'
-                manual_rev += f'<span class="muted"> ({_fmt(b.pooled_manual_rev, 1)} pooled)</span>'
             rows.append(
                 f"<tr><td>{b.lo_mph:.0f}–{('' if b.hi_mph < 150 else '+')}{'' if b.hi_mph >= 150 else f'{b.hi_mph:.0f}'} mph</td>"
                 f"<td>{b.engaged_s:.0f}s / {b.manual_s:.0f}s</td>"

@@ -10,12 +10,10 @@ from .events import DriveArrays, Event
 from .extract import Drive
 from .grading import (
     GradeReport,
-    METRIC_BY_KEY,
     add_turn_samples,
     collect_samples,
     grade,
     resisted_angle_context,
-    score_ratio,
     turn_in_breakdown,
 )
 from .lateral import (
@@ -272,11 +270,8 @@ def analyze(
         events.extend(_turn_event(ep, da) for ep in turns)
         events.extend(_intent_event(w) for w in intents)
 
-    def pp_score(m, d):
-        return score_ratio(m, d, "lower", METRIC_BY_KEY["steer_rate_rms"].eps)
-
     an.pingpong = analyze_pingpong(
-        [(d.name, s, a) for d, s, a, _e in per_drive], pp_score
+        [(d.name, s, a) for d, s, a, _e in per_drive]
     )
     if an.pingpong:
         for ev in an.pingpong.worst_windows:
@@ -316,7 +311,7 @@ def analyze(
     if use_profile:
         from . import profile as P
 
-        an.profile_summary, profile_info = P.pool_for_grading(an, per_drive, pp_score)
+        an.profile_summary, profile_info = P.pool_for_grading(an, per_drive)
     else:
         from .profile import ProfileSummary
 

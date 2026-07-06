@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 
 from opgrader.events import build_arrays
-from opgrader.grading import score_ratio
 from opgrader.lateral import (
     analyze_pingpong,
     detect_intent_windows,
@@ -572,7 +571,7 @@ def test_pingpong_bins_and_worst():
     d = make_drive(dur, vEgo=vego, steeringAngleDeg=angle,
                    enabled=engaged, latActive=engaged, longActive=engaged)
     seg, da = _prep(d)
-    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    pp = analyze_pingpong([("synth", seg, da)])
     assert pp is not None
     b0 = pp.bins[0]  # 0-5 mph (2.2 m/s = 4.9 mph)
     b2 = pp.bins[2]  # 10-20 mph (6.7 m/s = 15 mph)
@@ -602,7 +601,7 @@ def test_pingpong_single_bin_insufficient_for_overall_score():
     d = make_drive(dur, vEgo=2.2, steeringAngleDeg=angle,
                    enabled=engaged, latActive=engaged, longActive=engaged)
     seg, da = _prep(d)
-    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    pp = analyze_pingpong([("synth", seg, da)])
     assert pp is not None
     assert pp.bins[0].score is not None
     assert pp.score is None
@@ -618,7 +617,7 @@ def test_pingpong_absolute_scored_when_no_manual_baseline():
     d = make_drive(dur, vEgo=17.9, steeringAngleDeg=angle,  # ~40 mph -> 35-55 bin
                    enabled=True, latActive=True, longActive=True)
     seg, da = _prep(d)
-    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    pp = analyze_pingpong([("synth", seg, da)])
     b = pp.bins[4]  # 35-55 mph
     assert b.engaged_s > 30 and b.manual_s == 0
     assert b.abs_scored is True
@@ -634,7 +633,7 @@ def test_pingpong_absolute_quiet_highway_scores_high():
     d = make_drive(dur, vEgo=17.9, steeringAngleDeg=angle,
                    enabled=True, latActive=True, longActive=True)
     seg, da = _prep(d)
-    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    pp = analyze_pingpong([("synth", seg, da)])
     b = pp.bins[4]
     assert b.abs_scored is True
     assert b.score is not None and b.score > 90
@@ -649,7 +648,7 @@ def test_pingpong_slow_weave_not_penalized_as_pingpong():
     d = make_drive(dur, vEgo=17.9, steeringAngleDeg=angle,
                    enabled=True, latActive=True, longActive=True)
     seg, da = _prep(d)
-    pp = analyze_pingpong([("synth", seg, da)], lambda m, dd: score_ratio(m, dd, "lower", 0.05))
+    pp = analyze_pingpong([("synth", seg, da)])
     b = pp.bins[4]
     assert b.abs_scored is True
     # the band strips the slow weave, so it scores far better than a real fast

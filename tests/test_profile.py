@@ -8,8 +8,7 @@ import pytest
 from opgrader import pipeline
 from opgrader import profile as P
 from opgrader.events import build_arrays, detect_events
-from opgrader.grading import METRICS, MIN_EVENTS, grade
-from opgrader.lateral import PP_BINS_MPH, PingPongBin, PingPongResult
+from opgrader.grading import METRICS, grade
 from opgrader.segments import segment_drive
 from tests.conftest import DT, make_drive
 
@@ -249,70 +248,13 @@ def test_same_drive_agg_absent_below_min_events():
     assert m.same_drive_agg is None  # 1 < MIN_EVENTS, not shown as independently qualified
 
 
-# --------------------------------------------------------------- ping-pong
-
-
-def test_pingpong_pool_rescues_thin_bin():
-    def pp_score(m, d):
-        r = m / max(d, 1e-6)
-        return max(0.0, 100.0 - 50.0 * (r - 1.0)) if r > 1 else 100.0
-
-    b = PingPongBin(lo_mph=0, hi_mph=5, engaged_s=60.0, manual_s=2.0,  # thin: below PP_MIN_BIN_S=30
-                    engaged_rms=2.0, manual_rms=None, engaged_rev=None, manual_rev=None)
-    pp = PingPongResult(bins=[b], sub_bins=[], score=None, worst_bin=None)
-    pooled = {P.PINGPONG_RMS_KEY: {"0-5mph": [2.0, 2.0, 2.0]}}  # 3 historical routes
-    P._pool_pingpong(pp, pooled, pp_score)
-    assert b.pooled_n == 3
-    assert b.score is not None  # rescued: 3 pooled >= MIN_EVENTS, engaged_s ok
-    assert b.pooled_manual_rms == pytest.approx(2.0)
-    # ...but one scored bin is below MIN_SCORED_FOR_CATEGORY, so still no
-    # category score (the pooled path now honors that gate like everywhere else)
-    assert pp.score is None
-
-
-def test_pingpong_pool_does_not_override_absolute_bin():
-    """Bins scored on absolute anchors (ping-pong at speed) must keep their
-    score even when pooled manual history exists -- pooling one in as a ratio
-    would wash the anchors out. Regression: with a driver profile loaded, a
-    sawing model scored 100 because it saws less than the human hand-parks."""
-    def lenient(m, d):  # a ratio that would hand out 100
-        return 100.0
-
-    b1 = PingPongBin(lo_mph=10, hi_mph=20, engaged_s=300.0, manual_s=0.0,
-                     engaged_rms=5.0, engaged_rev=40.0, score=57.0, abs_scored=True)
-    b2 = PingPongBin(lo_mph=20, hi_mph=35, engaged_s=300.0, manual_s=0.0,
-                     engaged_rms=1.5, engaged_rev=10.0, score=84.0, abs_scored=True)
-    pp = PingPongResult(bins=[b1, b2], sub_bins=[], score=None, worst_bin=None)
-    pooled = {P.PINGPONG_RMS_KEY: {"10-20mph": [9.0] * 8},
-              P.PINGPONG_REV_KEY: {"10-20mph": [40.0] * 8}}
-    P._pool_pingpong(pp, pooled, lenient)
-    assert b1.score == pytest.approx(57.0)  # absolute score preserved, NOT 100
-    assert b1.pooled_n == 0  # absolute bins aren't pooled into at all
-    assert pp.score is not None and pp.score < 84.0  # worst bin (57) pulls it down
-
-
-def test_pingpong_pool_leaves_unpooled_bin_untouched():
-    def pp_score(m, d):
-        return 100.0
-
-    b = PingPongBin(lo_mph=5, hi_mph=10, engaged_s=60.0, manual_s=60.0,
-                    engaged_rms=1.0, manual_rms=1.0, engaged_rev=5.0, manual_rev=5.0, score=87.0)
-    pp = PingPongResult(bins=[b], sub_bins=[], score=87.0, worst_bin=b)
-    P._pool_pingpong(pp, pooled={}, pp_score_fn=pp_score)
-    assert b.pooled_n == 0
-    assert b.score == pytest.approx(87.0)  # unchanged: no pooled history for this label
-    assert pp.score == pytest.approx(87.0)
-
-
-def test_pp_bin_label_matches_pp_bins_mph_shape():
-    labels = {P._pp_bin_label(lo, hi) for lo, hi in PP_BINS_MPH}
-    assert len(labels) == len(PP_BINS_MPH)  # all distinct
-    assert "0-5mph" in labels
+# Ping-Pong is scored on absolute anchors (not pooled), so there is no
+# ping-pong pooling path to test -- see profile._route_metrics_blob.
 
 
 # ------------------------------------------------------------------ privacy
 
-_ALLOWED_METRIC_KEYS = P.poolable_metric_keys() | {P.PINGPONG_RMS_KEY, P.PINGPONG_REV_KEY}
+_ALLOWED_METRIC_KEYS = P.poolable_metric_keys()
 
 
 def _walk_and_check(store: dict):

@@ -493,16 +493,9 @@ class PingPongBin:
     engaged_rev: float | None = None  # reversals/min
     manual_rev: float | None = None
     score: float | None = None
-    # True when scored on ABSOLUTE anchors (no manual baseline in this bin)
-    # rather than the ratio vs your own driving -- the report flags this so a
-    # reader knows the number isn't relative to their manual steering.
+    # scored on absolute anchors (always True now that ping-pong is scored on
+    # a fixed standard rather than relative to your own driving)
     abs_scored: bool = False
-    # driver-profile pooling (see profile.py): set only when pooled history
-    # for this bin's speed label exists; None/0 means "not pooled", i.e.
-    # this bin is scored exactly as if profiling didn't exist
-    pooled_n: int = 0  # count of OTHER routes' pooled point-estimates
-    pooled_manual_rms: float | None = None  # combined (this-route + pooled) median
-    pooled_manual_rev: float | None = None
 
 
 @dataclass
@@ -547,9 +540,9 @@ def _pp_accumulate(t, resid, v, base_mask, lo, hi, acc):
 
 
 def analyze_pingpong(
-    per_drive: list[tuple[str, Segmentation, DriveArrays]], score_fn
+    per_drive: list[tuple[str, Segmentation, DriveArrays]],
 ) -> PingPongResult | None:
-    """score_fn(model_value, driver_value) -> 0..100 (lower-better ratio score)."""
+    """Ping-pong per speed bin, scored on absolute anchors (see build_bins)."""
     have_angle = any(da.steering_angle is not None for _n, _s, da in per_drive)
     if not have_angle:
         return None

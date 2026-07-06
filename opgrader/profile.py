@@ -26,10 +26,8 @@ metrics are added. Explicitly EXCLUDED, and why:
     compare the model against) -- pooling it would be circular.
   - Plan-vs-You counterfactuals: paired same-moment plan-vs-actual data, a
     different shape entirely (counterfactual.py owns that, unscored anyway).
-Ping-Pong's per-speed-bin manual oscillation RMS / reversal rate ARE pooled
-too, via a separate path (PINGPONG_RMS_KEY / PINGPONG_REV_KEY below) because
-Ping-Pong is scored outside the METRICS table (time-weighted bin comparison,
-not a per-event ratio metric).
+  - Ping-Pong: scored on absolute anchors, not against your own driving, so
+    there is nothing to pool.
 
 Never skews: pooled data only ever extends the DRIVER side. The model side
 is always exactly what you engaged THIS run -- pooling cannot make the
@@ -48,23 +46,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .grading import METRICS, MIN_EVENTS, add_turn_samples, collect_samples
-from .lateral import PP_MIN_BIN_S, PingPongResult, analyze_pingpong, pp_category_score
+from .grading import METRICS, add_turn_samples, collect_samples
 
 DATA_DIR = Path(os.environ.get("OPGRADER_DATA", "~/.local/share/opgrader")).expanduser()
 PROFILE_FILE = DATA_DIR / "profile.json"
 
 PROFILE_VERSION = 1
 MAX_ROUTES_PER_FINGERPRINT = 60  # size/staleness bound, not a correctness requirement
-
-# A route contributes a Ping-Pong bin value with even a little manual data in
-# it (the whole point is thin per-route bins accumulating across routes);
-# whether the COMBINED pool is enough to actually score against is a
-# separate, later gate (MIN_EVENTS combined samples + real engaged data).
-PP_POOL_MIN_SECONDS = 3.0
-
-PINGPONG_RMS_KEY = "pingpong_osc_rms"
-PINGPONG_REV_KEY = "pingpong_reversal_rate"
 
 
 def poolable_metric_keys() -> frozenset[str]:
@@ -141,11 +129,7 @@ def _finite(vals) -> list[float]:
     return [float(v) for v in vals if v is not None and np.isfinite(v)]
 
 
-def _pp_bin_label(lo: float, hi: float) -> str:
-    return f"{lo:g}-{hi:g}mph"
-
-
-def _route_metrics_blob(drive, seg, da, events, turns, pp_score_fn) -> dict:
+def _route_metrics_blob(drive, seg, da, events, turns) -> dict:
     """This one route's own poolable driver-side samples (route-atomic)."""
     rsamples, _rbuckets = collect_samples([(drive, seg, da, events)])
     add_turn_samples(rsamples, turns)
@@ -154,17 +138,6 @@ def _route_metrics_blob(drive, seg, da, events, turns, pp_score_fn) -> dict:
         vals = _finite(rsamples.get(key, {}).get("driver", []))
         if vals:
             blob[key] = {"none": vals}
-
-    rp = analyze_pingpong([(drive.name, seg, da)], pp_score_fn)
-    if rp:
-        for b in rp.bins:
-            if b.manual_s < PP_POOL_MIN_SECONDS:
-                continue
-            label = _pp_bin_label(b.lo_mph, b.hi_mph)
-            if b.manual_rms is not None:
-                blob.setdefault(PINGPONG_RMS_KEY, {})[label] = [float(b.manual_rms)]
-            if b.manual_rev is not None:
-                blob.setdefault(PINGPONG_REV_KEY, {})[label] = [float(b.manual_rev)]
     return blob
 
 
@@ -221,59 +194,12 @@ def current_summary() -> ProfileSummary:
     return _summarize(store, sorted(store.get("fingerprints", {})))
 
 
-def _pool_pingpong(pp: PingPongResult, pooled: dict[str, dict[str, list[float]]], pp_score_fn) -> None:
-    """Extend each bin's manual baseline with pooled history, IN PLACE.
-
-    Only ever ADDS capability: a bin with no pooled history for its label is
-    left exactly as analyze_pingpong scored it. The model/engaged side is
-    never touched.
-    """
-    for b in pp.bins:
-        # Absolute-anchor bins (ping-pong at speed) are judged on a fixed
-        # standard, NOT relative to your driving -- pooling a manual baseline
-        # in and re-scoring as a ratio would wash the anchors out (a model
-        # that saws less than you do while hand-maneuvering would score 100).
-        # Leave them exactly as analyze_pingpong scored them.
-        if b.abs_scored:
-            continue
-        label = _pp_bin_label(b.lo_mph, b.hi_mph)
-        rms_pool = pooled.get(PINGPONG_RMS_KEY, {}).get(label, [])
-        rev_pool = pooled.get(PINGPONG_REV_KEY, {}).get(label, [])
-        b.pooled_n = len(rms_pool)
-        if not rms_pool and not rev_pool:
-            continue
-        rms_vals = list(rms_pool)
-        if b.manual_s >= PP_POOL_MIN_SECONDS and b.manual_rms is not None:
-            rms_vals.append(float(b.manual_rms))
-        rev_vals = list(rev_pool)
-        if b.manual_s >= PP_POOL_MIN_SECONDS and b.manual_rev is not None:
-            rev_vals.append(float(b.manual_rev))
-        if len(rms_vals) < MIN_EVENTS or b.engaged_rms is None or b.engaged_s < PP_MIN_BIN_S:
-            continue  # still not enough combined data, or no live model data to grade
-        combined_rms = float(np.median(rms_vals))
-        combined_rev = float(np.median(rev_vals)) if rev_vals else None
-        s_rms = pp_score_fn(b.engaged_rms, combined_rms)
-        s_rev = (
-            pp_score_fn(b.engaged_rev, combined_rev)
-            if (b.engaged_rev is not None and combined_rev is not None)
-            else None
-        )
-        b.score = float(np.mean([s for s in (s_rms, s_rev) if s is not None]))
-        b.pooled_manual_rms = combined_rms
-        b.pooled_manual_rev = combined_rev
-
-    # re-aggregate through the shared helper (worst-bin emphasis +
-    # MIN_SCORED_FOR_CATEGORY gate), so pooled and non-pooled runs agree
-    new_score, new_worst = pp_category_score(pp.bins)
-    if new_score is not None:
-        pp.score, pp.worst_bin = new_score, new_worst
-
-
-def pool_for_grading(an, per_drive, pp_score_fn, save: bool = True) -> tuple[ProfileSummary, dict]:
-    """Enrich an.samples[<poolable key>]["driver"] and an.pingpong's bins
-    with pooled profile history, IN PLACE, then upsert this run's own
-    per-route contributions and persist. Returns (summary, profile_info)
-    where profile_info feeds MetricResult provenance in grading.grade().
+def pool_for_grading(an, per_drive, save: bool = True) -> tuple[ProfileSummary, dict]:
+    """Enrich an.samples[<poolable key>]["driver"] with pooled profile history,
+    IN PLACE, then upsert this run's own per-route contributions and persist.
+    Returns (summary, profile_info) where profile_info feeds MetricResult
+    provenance in grading.grade(). (Ping-Pong is scored on absolute anchors,
+    not pooled.)
 
     Combined = this run's own driver_vals (an.samples, already the union of
     every route in THIS invocation) + every OTHER stored route's pooled
@@ -294,7 +220,7 @@ def pool_for_grading(an, per_drive, pp_score_fn, save: bool = True) -> tuple[Pro
     for drive, seg, da, events in per_drive:
         fp = drive.meta.car_fingerprint
         blob = _route_metrics_blob(
-            drive, seg, da, events, turns_by_drive.get(drive.name, []), pp_score_fn,
+            drive, seg, da, events, turns_by_drive.get(drive.name, []),
         )
         route_updates.setdefault(fp, {})[drive.name] = {
             "wall_time_start": drive.meta.wall_time_start,
@@ -324,11 +250,7 @@ def pool_for_grading(an, per_drive, pp_score_fn, save: bool = True) -> tuple[Pro
         an.samples[key]["driver"] = this_drive + pooled_vals
         profile_info[key] = {"this_drive": this_drive, "pooled": pooled_vals}
 
-    # 4. Ping-Pong bins (separate code path, not in METRICS)
-    if an.pingpong is not None:
-        _pool_pingpong(an.pingpong, pooled, pp_score_fn)
-
-    # 5. upsert + prune + persist (route-atomic; never partial)
+    # 4. upsert + prune + persist (route-atomic; never partial)
     if save:
         for fp, routes in route_updates.items():
             entry = store.setdefault("fingerprints", {}).setdefault(fp, {"routes": {}})
