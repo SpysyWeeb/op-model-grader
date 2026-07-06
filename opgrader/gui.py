@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import __version__
 from . import connect as C
-from .config import get_t_follow, set_t_follow
+from .config import get_t_follow
 
 try:
     import tkinter as tk
@@ -183,18 +183,6 @@ class App:
         grade = ttk.LabelFrame(self.root, text="grade")
         grade.pack(fill="x", **pad)
         self.grade_frame = grade
-        tf = ttk.Frame(grade)
-        tf.pack(fill="x", padx=6, pady=(4, 0))
-        ttk.Label(tf, text="personality follow targets (s):").pack(side="left")
-        self.tf_vars: dict[str, tk.StringVar] = {}
-        targets = get_t_follow()
-        for p in ("aggressive", "standard", "relaxed"):
-            ttk.Label(tf, text=f" {p}").pack(side="left", padx=(8, 2))
-            var = tk.StringVar(value=f"{targets[p]:g}")
-            ttk.Entry(tf, textvariable=var, width=6).pack(side="left")
-            self.tf_vars[p] = var
-        ttk.Label(tf, text="  (fork-dependent; stock: 1.25 / 1.45 / 1.75)",
-                  foreground="gray").pack(side="left")
         prow = ttk.Frame(grade)
         prow.pack(fill="x", padx=6, pady=(0, 4))
         self.profile_var = tk.BooleanVar(value=True)
@@ -546,21 +534,7 @@ class App:
         ):
             return
 
-        targets = {}
-        for p, var in self.tf_vars.items():
-            try:
-                v = float(var.get())
-                if 0.3 <= v <= 5.0:
-                    targets[p] = v
-                else:
-                    raise ValueError
-            except ValueError:
-                messagebox.showerror(
-                    "bad follow target",
-                    f"'{var.get()}' is not a valid t_follow for {p} (want 0.3-5.0 s)",
-                )
-                return
-        set_t_follow(targets)  # persist for next time (and for the CLI)
+        targets = get_t_follow()  # config-file/stock defaults; no in-GUI override
 
         # Cheap pre-check from already-known route metadata (no download or
         # decode) -- a fast UX nicety, NOT a substitute for the pipeline's
