@@ -29,6 +29,15 @@ except ImportError as e:  # pragma: no cover - depends on the host python
 
 POLL_JOB_MS = 500
 POLL_UPLOAD_MS = 30_000
+
+# requests exception class names (JobManager.fail() only passes the name
+# across the worker-thread boundary, not the live exception object -- see
+# connect.py) that mean "transient network trouble", not a real problem
+# with the grading itself: offer a plain retry instead of a scary traceback.
+NETWORK_ERROR_TYPES = {
+    "ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout",
+    "SSLError", "ProxyError", "ChunkedEncodingError",
+}
 PARTIAL_OK_FRACTION = 0.8
 
 
@@ -44,7 +53,7 @@ class App:
         self.badges: dict[str, dict] = {}     # fullname -> files_badge dict
         self.pending_uploads: set[str] = set()
         self.local_paths: list[str] = []
-        self._last_grade_args: tuple[list[str], list[str], dict] | None = None
+        self._last_grade_args: tuple[list[str], list[str], dict, bool] | None = None
 
         self._q: queue.Queue = queue.Queue()
         self._build_widgets()
@@ -563,8 +572,9 @@ class App:
             messagebox.showinfo("busy", "A grading job is already running — wait for it to finish.")
             return
         # remembered so the job-failure UI can offer a same-selection retry
-        # with the override if the pipeline's post-decode gate rejects it
-        self._last_grade_args = (routes, local_paths, targets)
+        # (a plain retry for a transient network failure, or with the
+        # mismatch override if the pipeline's post-decode gate rejects it)
+        self._last_grade_args = (routes, local_paths, targets, allow_mixed)
         self.grade_btn.config(state="disabled")
         self.progress.config(mode="indeterminate")
         self.progress.start(80)
@@ -599,13 +609,22 @@ class App:
             err = j["error"]
             self.status.config(text=f"error: {err['message']}")
             if err.get("type") == "MismatchError" and self._last_grade_args:
-                routes, local_paths, targets = self._last_grade_args
+                routes, local_paths, targets, _ = self._last_grade_args
                 if messagebox.askyesno(
                     "grading failed",
                     err["message"] + "\n\nRetry with --allow-mixed (grade them together anyway)? "
                     "The report will carry a warning banner.",
                 ):
                     self._launch_grade_job(routes, local_paths, targets, allow_mixed=True)
+                return
+            if err.get("type") in NETWORK_ERROR_TYPES and self._last_grade_args:
+                routes, local_paths, targets, allow_mixed = self._last_grade_args
+                if messagebox.askyesno(
+                    "grading failed",
+                    "Couldn't reach comma's servers to download rlogs — this is usually a "
+                    "temporary network problem, not something wrong with your data.\n\nRetry?",
+                ):
+                    self._launch_grade_job(routes, local_paths, targets, allow_mixed)
                 return
             messagebox.showerror(
                 "grading failed",

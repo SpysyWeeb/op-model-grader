@@ -149,3 +149,43 @@ def test_grade_proceeds_without_prompt_when_platforms_match(root, monkeypatch, t
         time.sleep(0.05)
     assert app._last_grade_args is not None
     assert set(app._last_grade_args[0]) == {"d|rA", "d|rB"}
+
+
+def test_network_error_offers_plain_retry_not_a_traceback(root, monkeypatch, tmp_path):
+    """A transient connection failure (what a dropped wifi/VPN blip looks
+    like downloading rlogs) should offer a plain "retry?" dialog, same
+    treatment as MismatchError already gets -- not a raw traceback dump,
+    which is what every OTHER exception type still correctly shows."""
+    import requests
+    from tkinter import messagebox
+
+    from opgrader import config
+    from opgrader import connect as C
+    from opgrader import gui
+
+    monkeypatch.setattr(C, "read_jwt", lambda: None)
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config.json")
+    app = gui.App(root)
+
+    app._last_grade_args = (["d|rA"], [], config.get_t_follow(), False)
+    app.jobs.try_start("d|rA")
+    app.jobs.fail(requests.exceptions.ConnectionError("Max retries exceeded"))
+
+    asked = {}
+
+    def fake_askyesno(title, msg):
+        asked["title"], asked["msg"] = title, msg
+        return False  # decline the retry -- just verifying the right dialog fired
+
+    def fail_if_shown(*a, **kw):
+        raise AssertionError("showerror (raw traceback) must not be used for a network error")
+
+    monkeypatch.setattr(messagebox, "askyesno", fake_askyesno)
+    monkeypatch.setattr(messagebox, "showerror", fail_if_shown)
+
+    app._poll_job()
+
+    assert asked.get("title") == "grading failed"
+    assert "network" in asked["msg"].lower()
+    assert "Retry" in asked["msg"]
+    assert "Traceback" not in asked["msg"] and "ConnectionError" not in asked["msg"]
