@@ -715,32 +715,18 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
         "turns build the baseline it's compared against.",
     ),
     "Turn-In Timing": (
-        "Blinker-free: every engaged turn is checked directly, sharp or gentler, "
-        "signaled or not, the same turn episodes Turn Execution uses. Two different "
-        "questions, both scored here. (1) Onset timing: how much later (+) or sooner "
-        "(-) the model's own commanded path called for the turn, vs. the instant the "
-        "wheel actually turned in — that instant is the reference point, shown as "
-        "'You: 0.00', so the Model column reads directly as a lead/lag relative to it. "
-        "Applies to every engaged turn, resisted or not. (2) Resisted divergence: only "
-        "fires when you were genuinely fighting the model's steering — your torque "
-        "pushing the opposite way from the model's own commanded torque, sustained at "
-        "least 0.3 s, not just a hand resting on the wheel. In plain terms: you're both "
-        "taking the same turn, but the model wants to take it harder (or softer) than "
-        "you're willing to, so you took over and held a different angle — the Model/You "
-        "columns show the typical angle each side actually held (in degrees) at the "
-        "moment the disagreement peaked, so you can see directly whether the model "
-        "wanted MORE turn than you gave it or less. A continuously-replanning model "
-        "rarely 'refuses' a turn outright, so this is about how far reality drifted "
-        "from its plan during a real tug-of-war. Turns with no such resistance score "
-        "nothing on this row (not a zero) — there was no disagreement to measure. "
-        "(A different, blinker-based 'Blinker turn intents' table elsewhere in this "
-        "report only covers turns you signaled below 20 mph — that's a separate, "
-        "unscored diagnostic, not this grade.)",
-        "Any turn counts, manual or model-driven, sharp or gentle, signaled or not "
-        "— more of them sharpens the onset-timing rows. The resisted-divergence rows "
-        "specifically want moments you actually resisted the model's steering (not "
-        "just touched the wheel) — if you never push back against a turn the model "
-        "gets wrong, there's nothing here to measure it.",
+        "Blinker-free, same turn episodes as Turn Execution. Onset timing: how much "
+        "later (+) or sooner (−) the model's commanded path called for the turn vs. "
+        "when the wheel actually turned in — that instant is the 'You: 0.00' "
+        "reference, so Model reads as a lead/lag against it; scored on every engaged "
+        "turn. Resisted divergence: only scores turns where you genuinely fought the "
+        "model's steering (opposing torque, sustained ≥ 0.3 s) — Model/You show the "
+        "angle each side actually held at the peak of the disagreement, so you can "
+        "see who wanted the sharper turn. No resistance means no score on that row, "
+        "not a zero.",
+        "Any turn sharpens the onset-timing rows. Resisted divergence specifically "
+        "needs moments you pushed back against the model's steering, not just "
+        "touched the wheel — never resisting means nothing to measure there.",
     ),
     "General Smoothness": (
         "Overall steering comfort at speed: RMS lateral jerk is side-to-side "
